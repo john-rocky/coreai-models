@@ -268,6 +268,99 @@ final class PipelineGate: Sendable {
     }
 }
 
+// MARK: - Extra Fixed-Shape States
+
+/// A model state beyond the KV cache pair — e.g. the SSM conv/recurrent states of
+/// hybrid-attention models (Qwen3.5 GatedDeltaNet). Unlike the KV cache these are
+/// fixed-shape (they don't grow with context), so one owned buffer is bound to every
+/// encode and zeroed on reset to start a fresh sequence.
+private struct PipelinedExtraState {
+    let name: String
+    let buffer: MTLBuffer
+    let scalarType: NDArray.ScalarType
+    let shape: [Int]
+    let strides: [Int]
+}
+
+// MARK: - Per-Token Inputs
+
+/// A model input beyond `input_ids`/`position_ids` whose value depends on the token id of
+/// the step being encoded — e.g. Gemma's per-layer-embedding rows, gathered by token id from
+/// a host-side mmap table too large to live in the graph. The engine owns one buffer holding
+/// `maxContextLength` per-step slots (slot index = token position, so in-flight prefill steps
+/// each read a distinct region and host writes never race the GPU), fills the step's slot via
+/// `EngineOptions.perTokenInputProvider`, and binds it as an additional input on every encode.
+private struct PipelinedPerTokenInput {
+    let name: String
+    let buffer: MTLBuffer
+    let scalarType: NDArray.ScalarType
+    let shape: [Int]
+    let strides: [Int]
+    let stepByteCount: Int
+}
+
+// MARK: - Static Inputs
+
+/// A model input bound to the SAME host buffer on every encode — e.g. a giant quantized
+/// embedding table mmap'd from disk that the graph gathers from in-graph by token id
+/// (Gemma 4's per-layer-embedding table as `ple_table`/`ple_scale` inputs). The buffer is
+/// supplied by `EngineOptions.staticInputBuffers`, is never written, and imposes no per-step
+/// host work — unlike per-token inputs there is no S=1 constraint and no decode-loop wait on
+/// the sampled token, so the full pipeline depth survives.
+private struct PipelinedStaticInput {
+    let name: String
+    let buffer: MTLBuffer
+    let scalarType: NDArray.ScalarType
+    let shape: [Int]
+    let strides: [Int]
+}
+
+/// One-shot rendezvous between the sampler's GPU-completion callback (which learns the
+/// sampled token on a Metal callback thread) and the decode loop (which must know that token
+/// BEFORE it can gather per-token inputs for the next step). Either side may arrive first;
+/// strict deliver/take alternation lets one instance be reused across steps.
+final class TokenRendezvous: Sendable {
+    private enum State {
+        case idle
+        case token(Int32)
+        case waiter(CheckedContinuation<Int32, Never>)
+    }
+
+    private let state = OSAllocatedUnfairLock<State>(initialState: .idle)
+
+    /// Called from the sampler completion callback with the sampled token.
+    func deliver(_ token: Int32) {
+        let waiter = state.withLock { state -> CheckedContinuation<Int32, Never>? in
+            switch state {
+            case .waiter(let continuation):
+                state = .idle
+                return continuation
+            default:
+                state = .token(token)
+                return nil
+            }
+        }
+        waiter?.resume(returning: token)
+    }
+
+    /// Awaited by the encode loop after submitting the sampler for a step.
+    func take() async -> Int32 {
+        await withCheckedContinuation { continuation in
+            let ready = state.withLock { state -> Int32? in
+                switch state {
+                case .token(let token):
+                    state = .idle
+                    return token
+                default:
+                    state = .waiter(continuation)
+                    return nil
+                }
+            }
+            if let token = ready { continuation.resume(returning: token) }
+        }
+    }
+}
+
 // MARK: - Engine Implementation
 
 private struct EngineImpl: ~Copyable {
@@ -301,6 +394,18 @@ private struct EngineImpl: ~Copyable {
     // KV cache — reuses CoreAIKVCache protocol from KVCache+CoreAI.swift
     var kvCache: any CoreAIKVCache
 
+    // Fixed-shape states beyond the KV pair (SSM conv/recurrent for hybrid models)
+    let extraStates: [PipelinedExtraState]
+
+    // Per-token inputs beyond input_ids/position_ids (host-gathered, e.g. Gemma PLE rows)
+    let perTokenInputs: [PipelinedPerTokenInput]
+    let perTokenInputProvider: PerTokenInputProvider?
+    let sampledTokenRendezvous = TokenRendezvous()
+
+    // Static inputs beyond input_ids/position_ids (same buffer every encode, e.g. mmap'd
+    // gather tables — see PipelinedStaticInput)
+    let staticInputs: [PipelinedStaticInput]
+
     // Logits — reuses GrowingLogitsBuffer from TensorStorage+CoreAI.swift
     var logits: GrowingLogitsBuffer
 
@@ -311,6 +416,9 @@ private struct EngineImpl: ~Copyable {
     // State
     var processedTokenCount: Int = 0
     var step: Int = 0
+    // Last GPU-sampled token, mirrored to the CPU only when per-token inputs need it
+    // (the decode loop must gather the next step's rows for this token).
+    var lastSampledToken: Int32? = nil
 
     // Backpressure gate — see PipelineGate doc-comment for the failure mode it prevents.
     // Capacity 3 covers {encode logits + sampler commit + optional KV-cache grow} in flight.
@@ -335,18 +443,41 @@ private struct EngineImpl: ~Copyable {
                 "Cannot find function '\(config.function)' in model")
         }
 
-        // Validate: 2 inputs, 1+ output, 2 states
-        guard descriptor.inputNames.count == 2 else {
+        // Validate: 2+ inputs (input_ids, position_ids, plus optional host-gathered
+        // per-token inputs), 1+ output, 2+ states (KV cache pair, plus optional
+        // fixed-shape extras such as the SSM conv/recurrent states of hybrid models)
+        guard descriptor.inputNames.count >= 2 else {
             throw InferenceRuntimeError.invalidInputType(
-                "Expected 2 inputs, got \(descriptor.inputNames.count): \(descriptor.inputNames)")
+                "Expected at least 2 inputs, got \(descriptor.inputNames.count): \(descriptor.inputNames)")
+        }
+        // Inputs beyond the first two are static (a buffer was supplied for the name in
+        // EngineOptions.staticInputBuffers) or per-token (filled by the provider per step).
+        let extraInputNames = Array(descriptor.inputNames.dropFirst(2))
+        let staticInputNames = extraInputNames.filter { options.staticInputBuffers[$0] != nil }
+        let perTokenInputNames = extraInputNames.filter { options.staticInputBuffers[$0] == nil }
+        guard perTokenInputNames.count <= Self.maxPerTokenInputs else {
+            throw InferenceRuntimeError.invalidInputType(
+                "At most \(Self.maxPerTokenInputs) per-token inputs beyond input_ids/position_ids "
+                    + "are supported, got \(perTokenInputNames.count): \(perTokenInputNames) "
+                    + "(constant inputs can ride EngineOptions.staticInputBuffers instead)")
+        }
+        guard staticInputNames.count <= Self.maxStaticInputs else {
+            throw InferenceRuntimeError.invalidInputType(
+                "At most \(Self.maxStaticInputs) static inputs are supported, "
+                    + "got \(staticInputNames.count): \(staticInputNames)")
         }
         guard descriptor.outputNames.count >= 1 else {
             throw InferenceRuntimeError.invalidOutputType(
                 "Expected at least 1 output, got \(descriptor.outputNames.count)")
         }
-        guard descriptor.stateNames.count == 2 else {
+        guard descriptor.stateNames.count >= 2 else {
             throw InferenceRuntimeError.invalidOutputType(
-                "Expected 2 states (KV cache), got \(descriptor.stateNames.count): \(descriptor.stateNames)")
+                "Expected at least 2 states (KV cache), got \(descriptor.stateNames.count): \(descriptor.stateNames)")
+        }
+        guard descriptor.stateNames.count - 2 <= Self.maxExtraStates else {
+            throw InferenceRuntimeError.invalidOutputType(
+                "At most \(Self.maxExtraStates) extra states beyond the KV pair are supported, "
+                    + "got \(descriptor.stateNames.count - 2): \(descriptor.stateNames.dropFirst(2))")
         }
 
         // Extract names
@@ -355,6 +486,128 @@ private struct EngineImpl: ~Copyable {
         let keyCacheName = descriptor.stateNames[0]
         let valueCacheName = descriptor.stateNames[1]
         let logitsOutputName = descriptor.outputNames[0]
+
+        // States beyond the KV pair must be fixed-shape; allocate one owned
+        // zero-filled buffer each (they persist across steps, zeroed on reset).
+        var extraStatesLocal: [PipelinedExtraState] = []
+        for name in descriptor.stateNames.dropFirst(2) {
+            guard case .ndArray(let desc) = descriptor.stateDescriptor(of: name) else {
+                throw InferenceRuntimeError.invalidOutputType(
+                    "Cannot get descriptor for extra state '\(name)'")
+            }
+            guard !desc.shape.contains(where: { $0 < 0 }) else {
+                throw InferenceRuntimeError.invalidOutputType(
+                    "Extra state '\(name)' has dynamic dims \(desc.shape) — only the first two "
+                        + "states (KV cache) may be dynamic in the pipelined engine")
+            }
+            let resolved = desc.resolvingDynamicDimensions(desc.shape)
+            let byteCount = resolved.minimumByteCount
+            guard let buf = device.makeBuffer(length: byteCount, options: .storageModeShared) else {
+                throw InferenceRuntimeError.bufferAllocationFailed(
+                    "extra state '\(name)' (\(byteCount) bytes)")
+            }
+            memset(buf.contents(), 0, byteCount)
+            extraStatesLocal.append(
+                PipelinedExtraState(
+                    name: name,
+                    buffer: buf,
+                    scalarType: desc.scalarType,
+                    shape: desc.shape,
+                    strides: resolved.preferredStrides
+                ))
+        }
+        if !extraStatesLocal.isEmpty {
+            CLILogger.log(
+                "Pipelined engine carrying \(extraStatesLocal.count) fixed-shape extra state(s): "
+                    + extraStatesLocal.map(\.name).joined(separator: ", "))
+        }
+
+        // Static inputs: the caller-supplied buffer is bound unchanged on every encode.
+        var staticInputsLocal: [PipelinedStaticInput] = []
+        for name in staticInputNames {
+            guard case .ndArray(let desc) = descriptor.inputDescriptor(of: name) else {
+                throw InferenceRuntimeError.invalidInputType(
+                    "Cannot get descriptor for static input '\(name)'")
+            }
+            guard !desc.shape.contains(where: { $0 < 0 }) else {
+                throw InferenceRuntimeError.invalidInputType(
+                    "Static input '\(name)' has dynamic dims \(desc.shape) — static inputs "
+                        + "must be fixed-shape")
+            }
+            let resolved = desc.resolvingDynamicDimensions(desc.shape)
+            let buffer = options.staticInputBuffers[name]!.buffer
+            guard buffer.length >= resolved.minimumByteCount else {
+                throw InferenceRuntimeError.invalidInputType(
+                    "Static input '\(name)' needs \(resolved.minimumByteCount) bytes but the "
+                        + "supplied buffer holds \(buffer.length)")
+            }
+            staticInputsLocal.append(
+                PipelinedStaticInput(
+                    name: name,
+                    buffer: buffer,
+                    scalarType: desc.scalarType,
+                    shape: desc.shape,
+                    strides: resolved.preferredStrides
+                ))
+        }
+        if !staticInputsLocal.isEmpty {
+            let fmt = ByteCountFormatter()
+            fmt.countStyle = .memory
+            let total = staticInputsLocal.reduce(0) { $0 + $1.buffer.length }
+            CLILogger.log(
+                "Pipelined engine carrying \(staticInputsLocal.count) static input(s): "
+                    + staticInputsLocal.map(\.name).joined(separator: ", ")
+                    + " (\(fmt.string(fromByteCount: Int64(total))) bound per encode)")
+        }
+
+        // Per-token inputs: fixed-shape, filled by the host provider once per step.
+        // One owned buffer holds maxContextLength slots (slot = token position) so
+        // in-flight steps read disjoint regions.
+        var perTokenInputsLocal: [PipelinedPerTokenInput] = []
+        for name in perTokenInputNames {
+            guard case .ndArray(let desc) = descriptor.inputDescriptor(of: name) else {
+                throw InferenceRuntimeError.invalidInputType(
+                    "Cannot get descriptor for per-token input '\(name)'")
+            }
+            guard !desc.shape.contains(where: { $0 < 0 }) else {
+                throw InferenceRuntimeError.invalidInputType(
+                    "Per-token input '\(name)' has dynamic dims \(desc.shape) — per-token inputs "
+                        + "must be fixed-shape (S=1)")
+            }
+            let resolved = desc.resolvingDynamicDimensions(desc.shape)
+            let stepByteCount = resolved.minimumByteCount
+            let byteCount = config.maxContextLength * stepByteCount
+            guard let buf = device.makeBuffer(length: byteCount, options: .storageModeShared) else {
+                throw InferenceRuntimeError.bufferAllocationFailed(
+                    "per-token input '\(name)' (\(byteCount) bytes)")
+            }
+            memset(buf.contents(), 0, byteCount)
+            perTokenInputsLocal.append(
+                PipelinedPerTokenInput(
+                    name: name,
+                    buffer: buf,
+                    scalarType: desc.scalarType,
+                    shape: desc.shape,
+                    strides: resolved.preferredStrides,
+                    stepByteCount: stepByteCount
+                ))
+        }
+        if !perTokenInputsLocal.isEmpty {
+            guard options.perTokenInputProvider != nil else {
+                throw InferenceRuntimeError.invalidInputType(
+                    "Model declares per-token input(s) "
+                        + perTokenInputsLocal.map(\.name).joined(separator: ", ")
+                        + " but EngineOptions.perTokenInputProvider is nil — set a provider "
+                        + "that gathers the rows for each token id")
+            }
+            let fmt = ByteCountFormatter()
+            fmt.countStyle = .memory
+            let total = perTokenInputsLocal.reduce(0) { $0 + $1.buffer.length }
+            CLILogger.log(
+                "Pipelined engine carrying \(perTokenInputsLocal.count) per-token input(s): "
+                    + perTokenInputsLocal.map(\.name).joined(separator: ", ")
+                    + " (\(fmt.string(fromByteCount: Int64(total))) slots)")
+        }
 
         // Extract state descriptors for KV cache shape/type
         guard case .ndArray(let keyCacheDesc) = descriptor.stateDescriptor(of: keyCacheName),
@@ -415,14 +668,18 @@ private struct EngineImpl: ~Copyable {
         let resolvedSize = options.resolvedKVCacheSize(maxContextLength: config.maxContextLength)
         CLILogger.log("Created \(options.kvCacheStrategy) KV cache with size \(resolvedSize, default: "nil")")
 
-        // Create growing logits buffer (reuses TensorStorage+CoreAI.swift)
+        // Create growing logits buffer (reuses TensorStorage+CoreAI.swift).
+        // A fully static logits output (e.g. a decode-only S=1 graph: [1, 1, vocab])
+        // can't be resolved at a larger capacity — size the buffer to its static
+        // sequence length instead of the prompt-sized default.
+        let logitsSeqIsStatic = logitsDesc.shape.count >= 2 && logitsDesc.shape[1] > 0
         let logitsRef = try GrowingLogitsBuffer(
             device: device,
             descriptor: descriptor,
             name: logitsOutputName,
             vocabSize: config.vocabSize,
-            maxCapacity: config.maxContextLength,
-            initialCapacity: averageExpectedPromptSize
+            maxCapacity: logitsSeqIsStatic ? logitsDesc.shape[1] : config.maxContextLength,
+            initialCapacity: logitsSeqIsStatic ? logitsDesc.shape[1] : averageExpectedPromptSize
         )
 
         // Load inference function
@@ -458,11 +715,79 @@ private struct EngineImpl: ~Copyable {
         self.inputTokensBuffer = inputTokensBuf
         self.cachePositionBuffers = (cachePosBuf0, cachePosBuf1)
         self.kvCache = kvCacheLocal
+        self.extraStates = extraStatesLocal
+        self.perTokenInputs = perTokenInputsLocal
+        self.perTokenInputProvider = options.perTokenInputProvider
+        self.staticInputs = staticInputsLocal
         self.logits = logitsRef
         self.cachedSampler = nil
         self.cachedSamplerTemperature = nil
 
         CLILogger.log("CoreAI pipelined engine initialized — Vocab: \(config.vocabSize)")
+    }
+
+    // MARK: - Extra State Binding
+
+    /// Maximum number of extra states beyond the KV pair. AsyncMutableViews'
+    /// lifetime is tied to each inserted value VARIABLE (`@_lifetime(self: &value)`),
+    /// so binding must be unrolled per arity with insert + encode in one scope —
+    /// see the `switch extraStates.count` at the encode sites.
+    static let maxExtraStates = 2
+
+    /// Build a bindable view over extra state `i` (caller guarantees `i < extraStates.count`).
+    private func extraStateValue(_ i: Int) -> InferenceFunction.AsyncMutableValue {
+        let extra = extraStates[i]
+        return unsafe InferenceFunction.AsyncMutableValue(
+            unsafeBuffer: extra.buffer,
+            byteOffset: 0,
+            scalarType: extra.scalarType,
+            shape: extra.shape,
+            strides: extra.strides
+        )
+    }
+
+    // MARK: - Per-Token Input Binding
+
+    /// Maximum number of per-token inputs beyond input_ids/position_ids.
+    static let maxPerTokenInputs = 2
+
+    /// Maximum number of static inputs (gather tables and the like).
+    static let maxStaticInputs = 4
+
+    /// Fill each per-token input's slot for `position` with rows for `token` (via the
+    /// provider) and merge the slot bindings into `inputs`. Slot = position keeps in-flight
+    /// steps on disjoint buffer regions.
+    private func bindPerTokenInputs(
+        token: Int32, position: Int,
+        into inputs: inout [String: InferenceFunction.AsyncValue]
+    ) throws {
+        guard let provider = perTokenInputProvider else {
+            throw InferenceRuntimeError.invalidState(
+                "Per-token inputs present but no provider — engine init should have rejected this")
+        }
+        for perToken in perTokenInputs {
+            let byteOffset = position * perToken.stepByteCount
+            provider(
+                perToken.name, token, position,
+                perToken.buffer.contents() + byteOffset, perToken.stepByteCount)
+            inputs[perToken.name] = unsafe InferenceFunction.AsyncValue(
+                unsafeBuffer: perToken.buffer,
+                byteOffset: byteOffset,
+                scalarType: perToken.scalarType,
+                shape: perToken.shape,
+                strides: perToken.strides
+            )
+        }
+    }
+
+    /// Per-token inputs constrain the engine to S=1 steps: each step's rows are gathered for
+    /// exactly one token. Run with `COREAI_CHUNK_THRESHOLD=1` so prefill chunks are S=1 too.
+    private func requireSingleTokenStep(_ queryLength: Int) throws {
+        guard queryLength == 1 else {
+            throw InferenceRuntimeError.invalidArgument(
+                "Model has per-token inputs — only S=1 steps are supported, got query length "
+                    + "\(queryLength). Set COREAI_CHUNK_THRESHOLD=1 so prefill runs as S=1 steps.")
+        }
     }
 
     // MARK: - Sampler
@@ -515,6 +840,21 @@ private struct EngineImpl: ~Copyable {
         let actualTokenCount = tokens.isEmpty ? 1 : tokens.count
         let queryLength = actualTokenCount
 
+        // Per-token inputs: resolve this step's token id (prompt token during prefill;
+        // the previous GPU-sampled token during decode, mirrored via the rendezvous).
+        var perTokenStepToken: Int32? = nil
+        if !perTokenInputs.isEmpty {
+            try requireSingleTokenStep(queryLength)
+            if let promptToken = tokens.first {
+                perTokenStepToken = promptToken
+            } else if let sampled = lastSampledToken {
+                perTokenStepToken = sampled
+            } else {
+                throw InferenceRuntimeError.invalidState(
+                    "Decode step with per-token inputs before any sampled token")
+            }
+        }
+
         defer {
             processedTokenCount += actualTokenCount
             step += 1
@@ -566,10 +906,23 @@ private struct EngineImpl: ~Copyable {
             strides: posStrides
         )
 
-        let asyncInputs: [String: InferenceFunction.AsyncValue] = [
+        var asyncInputs: [String: InferenceFunction.AsyncValue] = [
             inputIdsName: tokenValue,
             positionIdsName: posValue,
         ]
+        if let stepToken = perTokenStepToken {
+            try bindPerTokenInputs(token: stepToken, position: currentStep, into: &asyncInputs)
+        }
+        // Static inputs: same caller-owned buffer every step, nothing to fill.
+        for staticInput in staticInputs {
+            asyncInputs[staticInput.name] = unsafe InferenceFunction.AsyncValue(
+                unsafeBuffer: staticInput.buffer,
+                byteOffset: 0,
+                scalarType: staticInput.scalarType,
+                shape: staticInput.shape,
+                strides: staticInput.strides
+            )
+        }
 
         // Build States as AsyncMutableValue (KV cache, in-place update)
         let keyBuffer = kvCache.keyBinding.metalBuffer
@@ -619,14 +972,40 @@ private struct EngineImpl: ~Copyable {
 
         // Encode inference using the public encode() API.
         // This commits + uses runAfterSyncPoint (no stream wait) — enables true pipelining.
+        // Extra fixed-shape states (SSM conv/rec) are inserted in the same scope as the
+        // consuming encode call — the views' lifetime is tied to each inserted value
+        // variable, so insert and encode can't be separated by a scope boundary.
         let logitsSpan = InstrumentsProfiler.beginLogitsInference(
             step: currentStep, tokens: queryLength, engine: "CoreAI-Pipelined")
-        let _ = try function.encode(
-            inputs: asyncInputs,
-            states: consume asyncStates,
-            outputViews: consume asyncOutputs,
-            to: computeStream
-        )
+        switch extraStates.count {
+        case 0:
+            let _ = try function.encode(
+                inputs: asyncInputs,
+                states: consume asyncStates,
+                outputViews: consume asyncOutputs,
+                to: computeStream
+            )
+        case 1:
+            var extraValue0 = extraStateValue(0)
+            asyncStates.insert(&extraValue0, for: extraStates[0].name)
+            let _ = try function.encode(
+                inputs: asyncInputs,
+                states: consume asyncStates,
+                outputViews: consume asyncOutputs,
+                to: computeStream
+            )
+        default:  // 2 — init caps extra states at maxExtraStates
+            var extraValue0 = extraStateValue(0)
+            var extraValue1 = extraStateValue(1)
+            asyncStates.insert(&extraValue0, for: extraStates[0].name)
+            asyncStates.insert(&extraValue1, for: extraStates[1].name)
+            let _ = try function.encode(
+                inputs: asyncInputs,
+                states: consume asyncStates,
+                outputViews: consume asyncOutputs,
+                to: computeStream
+            )
+        }
         logitsSpan.end()
 
         // GPU sampling via Metal queue
@@ -642,10 +1021,14 @@ private struct EngineImpl: ~Copyable {
         do {
             let queue = pipelineQueue
             let localInFlightGate = inFlightGate
+            let localRendezvous = perTokenInputs.isEmpty ? nil : sampledTokenRendezvous
             let completionCallback: (Int32) -> Void = { nextToken in
                 // Release the pipeline slot acquired before encode. Happens on
                 // Metal's callback thread — PipelineGate.release() is thread-safe.
                 localInFlightGate.release()
+                // Mirror the sampled token to the CPU so the next step can gather
+                // its per-token inputs (no-op for models without them).
+                localRendezvous?.deliver(nextToken)
                 InstrumentsProfiler.endCustomInterval(
                     name: "CoreAIPipelinedEncodeNextStep",
                     signpostID: encodeStepID,
@@ -676,6 +1059,13 @@ private struct EngineImpl: ~Copyable {
         }
 
         sampleSpan.end()
+
+        // With per-token inputs, the next step's gather needs THIS step's sampled token on
+        // the CPU — wait for the sampler completion here. This serializes the GPU pipeline
+        // (the win over a hand-rolled loop is the on-GPU argmax + on-device KV, not depth).
+        if !perTokenInputs.isEmpty {
+            lastSampledToken = await sampledTokenRendezvous.take()
+        }
     }
 
     // MARK: - Token Generation
@@ -851,6 +1241,9 @@ private struct EngineImpl: ~Copyable {
     private mutating func _encodeChunk(tokens: [Int32]) async throws {
         let queryLength = tokens.count
         let currentStep = processedTokenCount
+        if !perTokenInputs.isEmpty {
+            try requireSingleTokenStep(queryLength)
+        }
 
         let chunkID = InstrumentsProfiler.beginCustomInterval(
             name: "CoreAIPipelinedChunk",
@@ -883,9 +1276,22 @@ private struct EngineImpl: ~Copyable {
             unsafeBuffer: cachePosBuffer, byteOffset: 0,
             scalarType: .int32, shape: posShape, strides: posStrides)
 
-        let asyncInputs: [String: InferenceFunction.AsyncValue] = [
+        var asyncInputs: [String: InferenceFunction.AsyncValue] = [
             inputIdsName: tokenValue, positionIdsName: posValue,
         ]
+        if !perTokenInputs.isEmpty, let chunkToken = tokens.first {
+            try bindPerTokenInputs(token: chunkToken, position: currentStep, into: &asyncInputs)
+        }
+        // Static inputs: same caller-owned buffer every step, nothing to fill.
+        for staticInput in staticInputs {
+            asyncInputs[staticInput.name] = unsafe InferenceFunction.AsyncValue(
+                unsafeBuffer: staticInput.buffer,
+                byteOffset: 0,
+                scalarType: staticInput.scalarType,
+                shape: staticInput.shape,
+                strides: staticInput.strides
+            )
+        }
 
         let keyBuffer = kvCache.keyBinding.metalBuffer
         let keyShape = kvCache.keyBinding.layout.shape
@@ -911,12 +1317,35 @@ private struct EngineImpl: ~Copyable {
         var asyncOutputs = InferenceFunction.AsyncMutableViews()
         asyncOutputs.insert(&logitsOutput, for: logitsOutputName)
 
-        let _ = try function.encode(
-            inputs: asyncInputs,
-            states: consume asyncStates,
-            outputViews: consume asyncOutputs,
-            to: computeStream
-        )
+        switch extraStates.count {
+        case 0:
+            let _ = try function.encode(
+                inputs: asyncInputs,
+                states: consume asyncStates,
+                outputViews: consume asyncOutputs,
+                to: computeStream
+            )
+        case 1:
+            var extraValue0 = extraStateValue(0)
+            asyncStates.insert(&extraValue0, for: extraStates[0].name)
+            let _ = try function.encode(
+                inputs: asyncInputs,
+                states: consume asyncStates,
+                outputViews: consume asyncOutputs,
+                to: computeStream
+            )
+        default:  // 2 — init caps extra states at maxExtraStates
+            var extraValue0 = extraStateValue(0)
+            var extraValue1 = extraStateValue(1)
+            asyncStates.insert(&extraValue0, for: extraStates[0].name)
+            asyncStates.insert(&extraValue1, for: extraStates[1].name)
+            let _ = try function.encode(
+                inputs: asyncInputs,
+                states: consume asyncStates,
+                outputViews: consume asyncOutputs,
+                to: computeStream
+            )
+        }
 
         processedTokenCount += queryLength
         step += 1
@@ -929,6 +1358,14 @@ private struct EngineImpl: ~Copyable {
         step = 0
         cachedSampler = nil
         cachedSamplerTemperature = nil
+        lastSampledToken = nil
+        // Fresh sequence: SSM-style extra states must restart from zero. The KV pair
+        // needs no clearing — attention only reads positions below the new offset.
+        // Per-token input slots need no clearing either: each step's slot is fully
+        // rewritten by the provider before it is bound.
+        for extra in extraStates {
+            memset(extra.buffer.contents(), 0, extra.buffer.length)
+        }
         span.end()
     }
 
@@ -943,11 +1380,15 @@ private struct EngineImpl: ~Copyable {
         // from warming every bucket shape — the jump from none→any is what matters.
         let defaultWarmupLength = 256
 
-        let shapesToWarm: [Int]
+        var shapesToWarm: [Int]
         if queryLength > 0 {
             shapesToWarm = [queryLength]
         } else {
             shapesToWarm = [1, defaultWarmupLength]
+        }
+        if !perTokenInputs.isEmpty {
+            // Per-token-input graphs are S=1 static — larger warmup shapes would be rejected.
+            shapesToWarm = [1]
         }
 
         CLILogger.log("Running warmup for \(shapesToWarm.count) shape(s)")
@@ -987,9 +1428,23 @@ private struct EngineImpl: ~Copyable {
             let posValue = unsafe InferenceFunction.AsyncValue(
                 unsafeBuffer: cachePosBuffer, byteOffset: 0,
                 scalarType: .int32, shape: pShape, strides: pStrides)
-            let asyncInputs: [String: InferenceFunction.AsyncValue] = [
+            var asyncInputs: [String: InferenceFunction.AsyncValue] = [
                 inputIdsName: tokenValue, positionIdsName: posValue,
             ]
+            if !perTokenInputs.isEmpty {
+                // Warm with the same dummy token the ids buffer holds, at position 0.
+                try bindPerTokenInputs(token: 1, position: 0, into: &asyncInputs)
+            }
+            // Static inputs: same caller-owned buffer every step, nothing to fill.
+            for staticInput in staticInputs {
+                asyncInputs[staticInput.name] = unsafe InferenceFunction.AsyncValue(
+                    unsafeBuffer: staticInput.buffer,
+                    byteOffset: 0,
+                    scalarType: staticInput.scalarType,
+                    shape: staticInput.shape,
+                    strides: staticInput.strides
+                )
+            }
 
             let keyBuffer = kvCache.keyBinding.metalBuffer
             let kShape = kvCache.keyBinding.layout.shape
@@ -1015,12 +1470,35 @@ private struct EngineImpl: ~Copyable {
             var asyncOutputs = InferenceFunction.AsyncMutableViews()
             asyncOutputs.insert(&logitsOutput, for: logitsOutputName)
 
-            let _ = try function.encode(
-                inputs: asyncInputs,
-                states: consume asyncStates,
-                outputViews: consume asyncOutputs,
-                to: computeStream
-            )
+            switch extraStates.count {
+            case 0:
+                let _ = try function.encode(
+                    inputs: asyncInputs,
+                    states: consume asyncStates,
+                    outputViews: consume asyncOutputs,
+                    to: computeStream
+                )
+            case 1:
+                var extraValue0 = extraStateValue(0)
+                asyncStates.insert(&extraValue0, for: extraStates[0].name)
+                let _ = try function.encode(
+                    inputs: asyncInputs,
+                    states: consume asyncStates,
+                    outputViews: consume asyncOutputs,
+                    to: computeStream
+                )
+            default:  // 2 — init caps extra states at maxExtraStates
+                var extraValue0 = extraStateValue(0)
+                var extraValue1 = extraStateValue(1)
+                asyncStates.insert(&extraValue0, for: extraStates[0].name)
+                asyncStates.insert(&extraValue1, for: extraStates[1].name)
+                let _ = try function.encode(
+                    inputs: asyncInputs,
+                    states: consume asyncStates,
+                    outputViews: consume asyncOutputs,
+                    to: computeStream
+                )
+            }
 
             // Warm up argmax kernel
             let logitsBuffer = logits.metalBuffer

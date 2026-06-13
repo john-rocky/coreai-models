@@ -1,3 +1,41 @@
+# Core AI Models — community fork (`-zoo`)
+
+> **This is an unofficial community fork of [`apple/coreai-models`](https://github.com/apple/coreai-models).**
+> It is **not affiliated with, endorsed by, or supported by Apple Inc.** "Core AI" and
+> "Apple" are trademarks of Apple Inc.; this fork uses them only to identify the upstream
+> project, not to endorse or promote this fork (BSD 3-Clause §3). For the official, supported
+> project go to [`apple/coreai-models`](https://github.com/apple/coreai-models).
+>
+> **Why this fork exists.** The upstream Swift pipelined inference engine validates exactly
+> two model states (the KV cache pair) and only `input_ids`/`position_ids` inputs, so it
+> cannot load *hybrid-attention* or *state-space* language bundles — e.g. Qwen3.5/3.6
+> (GatedDeltaNet), LFM2.5, and Granite 4 (Mamba2) fail at load with `Expected 2 states, got 4`.
+> This fork carries a **minimal additive runtime patch** to the pipelined engine so those
+> third-party bundles run unmodified, while everything else is byte-for-byte upstream.
+>
+> **What the patch adds** (additive only — no existing behavior changes, no new dependencies
+> beyond the system `Metal` framework):
+> - **Hybrid / SSM extra states** — the pipelined engine accepts `≥ 2` states and binds up to
+>   two fixed-shape extra states beyond the KV pair (the conv/recurrent states of hybrid
+>   models), zeroing them on `reset()`.
+> - **Per-token inputs** — an optional `EngineOptions.perTokenInputProvider` to fill model
+>   inputs gathered by the step's token id (e.g. Gemma per-layer-embedding rows).
+> - **Static inputs** — an optional `EngineOptions.staticInputBuffers` to bind a constant
+>   host buffer (e.g. an mmap'd embedding table) unchanged on every encode.
+> - A static-shape logits-buffer sizing fix for decode-only `S=1` graphs, and a one-line SSM
+>   state-descriptor shape fix on the Python export side (`primitives/macos/cache.py`).
+>
+> **Scope.** Only `swift/.../InferenceEngines/{CoreAIPipelinedEngine,EngineFactory}.swift` and
+> `python/.../primitives/macos/cache.py` differ from upstream. The model export recipes, model
+> catalog, and the rest of the Python/Swift trees are unmodified upstream. This fork is used by
+> [`coreai-kit`](https://github.com/john-rocky/coreai-kit) and the
+> [zoo](https://github.com/john-rocky/coreai-models-community) demos to run flagship hybrid
+> bundles via Swift Package Manager. Tagged releases: `v0.1.0-zoo` (this patch). Bug reports
+> and model requests for the *upstream* project belong in
+> [`apple/coreai-models`](https://github.com/apple/coreai-models/issues), not here.
+
+---
+
 # Core AI Models
 
 Model export recipes, Python primitives, and Swift runtime utilities for building on-device AI with [Core AI](https://developer.apple.com/documentation/coreai).

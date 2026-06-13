@@ -6,6 +6,7 @@
 import CoreAI
 import CoreAIShared
 import Foundation
+import Metal
 
 /// A factory that creates inference engines from model configurations and assets.
 ///
@@ -219,6 +220,44 @@ public struct EngineFactory: Sendable {
     }
 }
 
+/// Fills one per-token model input for one step.
+///
+/// Models may declare inputs beyond `input_ids`/`position_ids` whose values depend on the
+/// token id of the step being encoded — e.g. Gemma's per-layer-embedding rows, gathered by
+/// token id from a host-side table too large to live in the graph. The pipelined engine calls
+/// the provider once per extra input per step, passing the input's `name`, the step's `token`
+/// id and `position`, and a `destination` the provider must fill with exactly `byteCount`
+/// bytes laid out as the input's descriptor (e.g. fp16 `[1, 1, layers, dim]`).
+///
+/// Called on the engine's inference task (prefill: token known from the prompt) or right
+/// after the GPU sampler reports the previous token (decode) — keep it fast (sub-millisecond
+/// mmap gathers); the decode loop is serialized on it.
+public typealias PerTokenInputProvider = @Sendable (
+    _ name: String, _ token: Int32, _ position: Int,
+    _ destination: UnsafeMutableRawPointer, _ byteCount: Int
+) -> Void
+
+/// A model input bound to the SAME host buffer on every encode step.
+///
+/// For inputs whose value never changes across steps — e.g. a giant quantized
+/// embedding table the graph gathers from in-graph by token id, too large to live
+/// in the graph as a constant (Gemma 4's 2.3 GB per-layer-embedding table). The
+/// engine binds the buffer as-is on every encode: no per-step host work, no S=1
+/// constraint, and — unlike ``PerTokenInputProvider`` — no decode-loop wait on the
+/// sampled token, so the full GPU pipeline depth survives.
+///
+/// Create the buffer once (typically `MTLDevice.makeBuffer(bytesNoCopy:)` over a
+/// page-aligned read-only mmap of the table file) and keep it alive for the
+/// engine's lifetime. The buffer must be at least as long as the input's
+/// descriptor requires; contents are never written by the engine.
+public struct StaticInputBuffer: @unchecked Sendable {
+    public let buffer: any MTLBuffer
+
+    public init(_ buffer: any MTLBuffer) {
+        self.buffer = buffer
+    }
+}
+
 /// Options that customize how the factory creates an inference engine and how
 /// the engine manages its KV cache.
 public struct EngineOptions: Sendable {
@@ -248,6 +287,20 @@ public struct EngineOptions: Sendable {
     /// - `.chunked`: the window size.
     public let kvCacheSize: Int?
 
+    /// Host-side filler for per-token model inputs (inputs beyond `input_ids`/`position_ids`).
+    ///
+    /// Required when the model declares per-token inputs; ignored otherwise. Only the
+    /// pipelined engine supports per-token inputs. See ``PerTokenInputProvider``.
+    public let perTokenInputProvider: PerTokenInputProvider?
+
+    /// Constant host buffers for static model inputs, keyed by input name.
+    ///
+    /// An input beyond `input_ids`/`position_ids` whose name appears here is bound to
+    /// the given buffer unchanged on every encode (e.g. an mmap'd embedding table the
+    /// graph gathers from in-graph); any other extra input falls back to the per-token
+    /// path. Only the pipelined engine supports static inputs. See ``StaticInputBuffer``.
+    public let staticInputBuffers: [String: StaticInputBuffer]
+
     /// Creates an options value with the variant and KV cache settings you specify.
     ///
     /// - Parameters:
@@ -256,14 +309,22 @@ public struct EngineOptions: Sendable {
     ///   - kvCacheStrategy: The KV cache allocation strategy. Defaults to `.auto`.
     ///   - kvCacheSize: The KV cache size in tokens, or `nil` to use the strategy's default size.
     ///     Defaults to `nil`.
+    ///   - perTokenInputProvider: The filler for per-token model inputs, or `nil` for models
+    ///     without them. Defaults to `nil`.
+    ///   - staticInputBuffers: Constant buffers for static model inputs, keyed by input
+    ///     name. Defaults to empty.
     public init(
         variant: String? = nil,
         kvCacheStrategy: KVCacheStrategy = .auto,
-        kvCacheSize: Int? = nil
+        kvCacheSize: Int? = nil,
+        perTokenInputProvider: PerTokenInputProvider? = nil,
+        staticInputBuffers: [String: StaticInputBuffer] = [:]
     ) {
         self.variant = variant
         self.kvCacheStrategy = kvCacheStrategy
         self.kvCacheSize = kvCacheSize
+        self.perTokenInputProvider = perTokenInputProvider
+        self.staticInputBuffers = staticInputBuffers
     }
 
     /// Returns the KV cache size in tokens that the engine uses for a given context length.
