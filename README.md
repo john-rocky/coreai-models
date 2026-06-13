@@ -24,13 +24,21 @@
 >   host buffer (e.g. an mmap'd embedding table) unchanged on every encode.
 > - A static-shape logits-buffer sizing fix for decode-only `S=1` graphs, and a one-line SSM
 >   state-descriptor shape fix on the Python export side (`primitives/macos/cache.py`).
+> - **(`v0.1.1-zoo`) Stop on consumer break.** When the consumer stops the returned token
+>   stream — what every executor does at EOS — the pipelined engine now stops within pipeline
+>   depth instead of generating on to `maxTokens` in the background. The leftover post-EOS
+>   tokens used to be consumed into the KV cache, so the next turn's `reset()`/`drain()`
+>   blocked on them (a multi-turn latency tax) and a slow model risked `drain()`'s fatalError.
+>   Measured: a two-turn chat through Apple's own `CoreAILanguageModel` adapter dropped its
+>   second-turn latency from 2.74 s to 0.40 s, with byte-identical output.
 >
 > **Scope.** Only `swift/.../InferenceEngines/{CoreAIPipelinedEngine,EngineFactory}.swift` and
 > `python/.../primitives/macos/cache.py` differ from upstream. The model export recipes, model
 > catalog, and the rest of the Python/Swift trees are unmodified upstream. This fork is used by
 > [`coreai-kit`](https://github.com/john-rocky/coreai-kit) and the
 > [zoo](https://github.com/john-rocky/coreai-models-community) demos to run flagship hybrid
-> bundles via Swift Package Manager. Tagged releases: `v0.1.0-zoo` (this patch). Bug reports
+> bundles via Swift Package Manager. Tagged releases: `v0.1.0-zoo` (hybrid-bundle support),
+> `v0.1.1-zoo` (adds the consumer-break stop fix). Bug reports
 > and model requests for the *upstream* project belong in
 > [`apple/coreai-models`](https://github.com/apple/coreai-models/issues), not here.
 

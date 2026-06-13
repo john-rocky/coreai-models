@@ -111,12 +111,28 @@ final class CoreAIPipelinedEngine: InferenceEngine, Sendable {
                 let (tokenStream, tokenContinuation) =
                     AsyncThrowingStream<InferenceEngine.TokenId, any Error>.makeStream()
 
+                // Stop the GPU when the consumer stops the returned stream. A consumer that
+                // breaks at EOS (what every executor does) would otherwise leave runCompletion
+                // generating to maxTokens in the background — those post-EOS tokens are
+                // consumed into the KV cache, so the next turn's reset()/drain() blocks on the
+                // leftover generation (the multi-turn re-prefill tax) and a slow model risks
+                // drain()'s fatalError. Ending the inner token stream trips runCompletion's
+                // onTermination → its cancel flag → it stops within pipeline depth. Wired both
+                // eagerly (stream onTermination) and from the forwarding loop's yield result,
+                // so a break is honored even if it lands while the loop is awaiting a token.
+                outputContinuation.onTermination = { _ in tokenContinuation.finish() }
+
                 // Forward tokens from tokenStream → outputContinuation as InferenceOutput.
                 // This must run concurrently with runCompletion.
                 async let forwarding: Void = {
                     do {
                         for try await token in tokenStream {
-                            outputContinuation.yield(InferenceOutput(tokenId: token))
+                            if case .terminated = outputContinuation.yield(
+                                InferenceOutput(tokenId: token))
+                            {
+                                tokenContinuation.finish()
+                                break
+                            }
                         }
                     } catch {
                         outputContinuation.finish(throwing: error)
