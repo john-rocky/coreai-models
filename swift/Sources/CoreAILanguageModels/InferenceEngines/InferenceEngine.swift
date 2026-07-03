@@ -108,6 +108,20 @@ public protocol InferenceEngine: Sendable {
     /// Reset internal state including KV cache.
     func reset() async throws
 
+    /// Rewind the KV cache toward `length` tokens for cross-call PREFIX REUSE, keeping the
+    /// leading cached tokens valid and dropping everything after — so the next
+    /// `generate(with:)` prefills only the un-cached suffix instead of the whole prompt.
+    /// (Attention is causal: positions ≥ the retained length are overwritten before being
+    /// read, so no clearing is needed.)
+    ///
+    /// Returns the ACTUAL retained prefix length (0…`length`), which may be less than
+    /// requested because the last generated token's KV can lag one step behind — the
+    /// caller must prefill from the returned offset, not from `length`. Returns a
+    /// negative value if the engine can't safely rewind (recurrent/SSM state can't be
+    /// reconstructed mid-sequence; non-KV engines have nothing to trim), in which case
+    /// the caller must `reset()` and re-feed the full prompt. Default: unsupported.
+    func trimKVCache(to length: Int) async -> Int
+
     /// Run dummy inference to trigger kernel compilation.
     func warmup(queryLength: Int, sampling: SamplingConfiguration?) async throws
 
@@ -116,6 +130,12 @@ public protocol InferenceEngine: Sendable {
     /// Whether this engine supports per-step logits extraction.
     /// GPU-pipelined engines (which sample on-device) return false.
     var supportsLogits: Bool { get }
+
+    /// Feed contract for prefix reuse after `trimKVCache`. `true`: `generate(with:)` takes
+    /// the FULL running sequence and prefills only `input[retained...]` (sequential engine
+    /// slices internally). `false`: the caller passes ONLY the un-cached suffix (pipelined
+    /// prefills the given tokens at the current offset). Default: `true`.
+    var prefixReuseFeedsFullSequence: Bool { get }
 
     // MARK: - Configuration
 
@@ -159,6 +179,13 @@ extension InferenceEngine {
     /// Default: supportsLogits is false. Engines that can return per-step
     /// logits (sequential, static-shape) override this to true.
     public var supportsLogits: Bool { false }
+
+    /// Default: prefix reuse unsupported (recurrent/non-KV engines). Attention-only
+    /// KV engines override this to rewind `processedTokenCount`.
+    public func trimKVCache(to length: Int) async -> Int { -1 }
+
+    /// Default: reuse callers pass the full running sequence (engine slices internally).
+    public var prefixReuseFeedsFullSequence: Bool { true }
 }
 
 extension InferenceEngine {

@@ -174,6 +174,19 @@ final class CoreAIPipelinedEngine: InferenceEngine, Sendable {
         engine.reset()
     }
 
+    /// Pipelined prefills exactly the tokens passed to `generate(with:)` at the current
+    /// offset, so a prefix-reuse caller must pass only the un-cached suffix.
+    var prefixReuseFeedsFullSequence: Bool { false }
+
+    /// Rewind the KV toward `length` for prefix reuse (see `InferenceEngine.trimKVCache`).
+    /// Only valid for pure-attention KV graphs — negative for hybrids with recurrent state.
+    func trimKVCache(to length: Int) async -> Int {
+        drain()
+        guard tryAcquireEngine() else { return -1 }
+        defer { releaseEngine() }
+        return engine.trimKVCache(to: length)
+    }
+
     func cleanup() async throws {
         let cleanupSpan = InstrumentsProfiler.beginCleanup(engine: "CoreAI-Pipelined")
         if tryAcquireEngine() {
@@ -1383,6 +1396,22 @@ private struct EngineImpl: ~Copyable {
             memset(extra.buffer.contents(), 0, extra.buffer.length)
         }
         span.end()
+    }
+
+    /// Rewind the cache offset to `length` so the next prefill starts there, reusing the
+    /// first `length` KV entries. Rejected when the graph carries recurrent `extraStates`
+    /// (GDN/SSM): those hold a running scan that can't be reconstructed at position
+    /// `length` from the retained KV, so a partial rewind would corrupt them. Pure
+    /// attention KV needs no clearing (causal reads never see positions ≥ `length`).
+    mutating func trimKVCache(to length: Int) -> Int {
+        guard extraStates.isEmpty else { return -1 }
+        // The last generated token's KV lags one decode step, so the committed cache may
+        // be shorter than `length`; retain the largest valid prefix and report it.
+        let retained = max(0, min(length, processedTokenCount))
+        processedTokenCount = retained
+        step = retained
+        lastSampledToken = nil
+        return retained
     }
 
     // MARK: - Warmup

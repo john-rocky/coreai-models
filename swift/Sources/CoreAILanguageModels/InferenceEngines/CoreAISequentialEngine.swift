@@ -429,6 +429,19 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
         resetSpan.end()
     }
 
+    /// Rewind the cache offset for prefix reuse (see `InferenceEngine.trimKVCache`). This
+    /// engine's `generate(with:)` already prefills only `input[processedTokenCount...]`, so
+    /// after this the caller re-feeds the FULL running sequence and only the suffix is
+    /// processed. KV-only (no recurrent state) — always safe; no clearing needed since
+    /// causal attention never reads positions ≥ the retained offset before they're rewritten.
+    public func trimKVCache(to length: Int) async -> Int {
+        drain()
+        guard length >= 0 else { return -1 }
+        let retained = min(length, processedTokenCount)
+        processedTokenCount = retained
+        return retained
+    }
+
     public func cleanup() {
         let cleanupSpan = InstrumentsProfiler.beginCleanup(engine: "CoreAIClean")
         CLILogger.log("CoreAI clean engine cleanup complete")
