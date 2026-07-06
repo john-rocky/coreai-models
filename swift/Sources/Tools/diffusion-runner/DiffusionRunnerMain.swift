@@ -52,6 +52,9 @@ struct DiffusionRunner: AsyncParsableCommand {
     @Option(help: "Path to reference image for FLUX.2 in-context editing (requires Transformer_edit.aimodel)")
     var editImage: String?
 
+    @Option(help: "Path to a second reference image (multi-reference edit; requires Transformer_edit_2ref.aimodel)")
+    var editImage2: String?
+
     @Option(help: "Edit instruction for FLUX.2 in-context editing (used with --edit-image)")
     var instruction: String = ""
 
@@ -145,14 +148,24 @@ struct DiffusionRunner: AsyncParsableCommand {
                     print("Error: could not load edit image at \(editPath)")
                     throw ExitCode.failure
                 }
-                let editName = decodeResolution == .half ? "Transformer_edit_512.aimodel" : "Transformer_edit.aimodel"
+                var refs = [refImg]
+                let half = decodeResolution == .half
+                var editName = half ? "Transformer_edit_512.aimodel" : "Transformer_edit.aimodel"
+                if let editPath2 = editImage2 {
+                    guard let ref2 = loadCGImage(from: URL(fileURLWithPath: editPath2)) else {
+                        print("Error: could not load second edit image at \(editPath2)")
+                        throw ExitCode.failure
+                    }
+                    refs.append(ref2)
+                    editName = half ? "Transformer_edit_2ref_512.aimodel" : "Transformer_edit_2ref.aimodel"
+                }
                 let editTransformer = CoreAIDiffusionModelFunction(
                     modelURL: modelURL.appendingPathComponent(editName))
-                print("Editing (FLUX.2): \"\(instruction)\"  [\(editName)]")
+                print("Editing (FLUX.2, \(refs.count) ref): \"\(instruction)\"  [\(editName)]")
                 print("Steps: \(effectiveSteps), Seed: \(seed)")
                 let start = ContinuousClock.now
                 let result = try await pipeline.editImages(
-                    referenceImage: refImg, instruction: instruction, editTransformer: editTransformer,
+                    referenceImages: refs, instruction: instruction, editTransformer: editTransformer,
                     stepCount: effectiveSteps, seed: seed, guidanceScale: effectiveGuidance
                 ) { progress in
                     print("  Step \(progress.step)/\(progress.totalSteps)")

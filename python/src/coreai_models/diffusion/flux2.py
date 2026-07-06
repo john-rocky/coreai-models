@@ -284,20 +284,20 @@ def dummy_flux2_transformer_512(pipe: Any) -> tuple[torch.Tensor, ...]:
 
 
 def _dummy_flux2_transformer_edit_impl(
-    pipe: Any, out_grid: int, ref_grid: int, ref_t_scale: int = 10
+    pipe: Any, out_grid: int, ref_grid: int, num_refs: int = 1, ref_t_scale: int = 10
 ) -> tuple[torch.Tensor, ...]:
     """In-context edit variant: the image sequence is the denoised output latent (T=0)
-    concatenated with one reference image's latent tokens (T=ref_t_scale). Mirrors the
-    diffusers Flux2 edit path (output ids via _prepare_latent_ids at T=0; reference ids via
-    _prepare_image_ids at T=scale+scale*i). Same transformer graph as text-to-image — only a
-    longer fixed sequence and the reference block's T coordinate differ. The runtime supplies
-    the concatenated latents + this exact id layout (RoPE is precomputed and passed in).
+    concatenated with `num_refs` reference images' latent tokens (T=scale, 2*scale, …). Mirrors
+    the diffusers Flux2 edit path (output ids via _prepare_latent_ids at T=0; reference ids via
+    _prepare_image_ids with t_coords = scale + scale*i). Same transformer graph as text-to-image
+    — only a longer fixed sequence and the reference blocks' T coordinates differ. The runtime
+    supplies the concatenated latents + this exact id layout (RoPE is precomputed and passed in).
     """
     cfg = pipe.transformer.config
     dtype = next(pipe.transformer.parameters()).dtype
     out_seq = out_grid * out_grid
     ref_seq = ref_grid * ref_grid
-    image_seq_len = out_seq + ref_seq
+    image_seq_len = out_seq + num_refs * ref_seq
     text_seq_len = 512
     axes_dim = list(cfg.axes_dims_rope)
     theta = cfg.rope_theta if hasattr(cfg, "rope_theta") else 2000.0
@@ -311,13 +311,16 @@ def _dummy_flux2_transformer_edit_impl(
             idx = h * out_grid + w
             img_ids[0, idx, 1] = float(h)
             img_ids[0, idx, 2] = float(w)
-    # Reference image block: T = ref_t_scale (first reference → scale).
-    for h in range(ref_grid):
-        for w in range(ref_grid):
-            idx = out_seq + h * ref_grid + w
-            img_ids[0, idx, 0] = float(ref_t_scale)
-            img_ids[0, idx, 1] = float(h)
-            img_ids[0, idx, 2] = float(w)
+    # Reference image blocks: reference i → T = ref_t_scale * (i + 1).
+    for i in range(num_refs):
+        base = out_seq + i * ref_seq
+        t = float(ref_t_scale * (i + 1))
+        for h in range(ref_grid):
+            for w in range(ref_grid):
+                idx = base + h * ref_grid + w
+                img_ids[0, idx, 0] = t
+                img_ids[0, idx, 1] = float(h)
+                img_ids[0, idx, 2] = float(w)
 
     txt_ids = torch.zeros(1, text_seq_len, num_rope_axes)
     for i in range(text_seq_len):
@@ -336,10 +339,20 @@ def _dummy_flux2_transformer_edit_impl(
 
 
 def dummy_flux2_transformer_edit(pipe: Any) -> tuple[torch.Tensor, ...]:
-    """1024 output + 1024 reference (grid=64 each, seqLen=8192)."""
-    return _dummy_flux2_transformer_edit_impl(pipe, out_grid=64, ref_grid=64)
+    """1024 output + 1 × 1024 reference (grid=64, seqLen=8192)."""
+    return _dummy_flux2_transformer_edit_impl(pipe, out_grid=64, ref_grid=64, num_refs=1)
 
 
 def dummy_flux2_transformer_edit_512(pipe: Any) -> tuple[torch.Tensor, ...]:
-    """512 output + 512 reference (grid=32 each, seqLen=2048)."""
-    return _dummy_flux2_transformer_edit_impl(pipe, out_grid=32, ref_grid=32)
+    """512 output + 1 × 512 reference (grid=32, seqLen=2048)."""
+    return _dummy_flux2_transformer_edit_impl(pipe, out_grid=32, ref_grid=32, num_refs=1)
+
+
+def dummy_flux2_transformer_edit_2ref(pipe: Any) -> tuple[torch.Tensor, ...]:
+    """1024 output + 2 × 1024 references (grid=64, seqLen=12288)."""
+    return _dummy_flux2_transformer_edit_impl(pipe, out_grid=64, ref_grid=64, num_refs=2)
+
+
+def dummy_flux2_transformer_edit_2ref_512(pipe: Any) -> tuple[torch.Tensor, ...]:
+    """512 output + 2 × 512 references (grid=32, seqLen=3072)."""
+    return _dummy_flux2_transformer_edit_impl(pipe, out_grid=32, ref_grid=32, num_refs=2)

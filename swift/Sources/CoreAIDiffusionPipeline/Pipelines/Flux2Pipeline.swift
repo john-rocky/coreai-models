@@ -752,8 +752,29 @@ extension Flux2Pipeline {
     /// Reference-conditioned instruction edit. `editTransformer` must be the edit-sequence graph
     /// (`Transformer_edit` / `_512`), exported at (output tokens + one reference image's tokens).
     /// The reference is encoded at the same grid as the output, so both blocks are `spatialSide`².
+    /// Single-reference convenience — see the multi-reference overload.
     public func editImages(
         referenceImage: CGImage,
+        instruction: String,
+        editTransformer: CoreAIDiffusionModelFunction,
+        stepCount: Int = 4,
+        seed: UInt32 = 0,
+        guidanceScale: Float = 1.0,
+        lazyModelLoading: Bool = true,
+        progressHandler: @Sendable (PipelineProgress) -> Bool = { _ in true }
+    ) async throws -> GenerationResult {
+        try await editImages(
+            referenceImages: [referenceImage], instruction: instruction, editTransformer: editTransformer,
+            stepCount: stepCount, seed: seed, guidanceScale: guidanceScale,
+            lazyModelLoading: lazyModelLoading, progressHandler: progressHandler)
+    }
+
+    /// Multi-reference in-context edit: the transformer attends to N clean reference images
+    /// (each at time index `T = scale·(i+1)`) while denoising the output (`T=0`), so the
+    /// instruction can combine subjects/scenes across references. Requires an edit-sequence
+    /// transformer exported for exactly `referenceImages.count` references.
+    public func editImages(
+        referenceImages: [CGImage],
         instruction: String,
         editTransformer: CoreAIDiffusionModelFunction,
         stepCount: Int = 4,
@@ -766,23 +787,29 @@ extension Flux2Pipeline {
             throw NSError(domain: "Flux2Pipeline", code: 2,
                 userInfo: [NSLocalizedDescriptionKey: "edit requires a VAE encoder component"])
         }
+        precondition(!referenceImages.isEmpty, "edit needs at least one reference image")
 
         let imageSize = defaultImageSize.width
         let spatialSide = imageSize / Self.patchSize
         let inChannels = Self.latentChannels
         let outSeq = spatialSide * spatialSide          // output (denoised) tokens, T = 0
-        let refSeq = spatialSide * spatialSide          // one reference image, T = refTScale
+        let refSeq = spatialSide * spatialSide          // per-reference tokens
+        let numRefs = referenceImages.count
         let refTScale = 10                              // matches diffusers _prepare_image_ids scale
 
         // 1. Instruction text embeddings.
         let textEmbeddings = try await encodeText(instruction)
         let hDim = hiddenDim(textEmbeddings)
 
-        // 2. Reference image → clean latent tokens (encode → scale → patchify → BN → pack). No noise.
+        // 2. Each reference → clean latent tokens, concatenated (ref0 ⊕ ref1 ⊕ …). No noise.
         try await encoder.loadResources()
-        let refPacked = try await encodeReferenceLatents(
-            encoder: encoder, image: referenceImage,
-            imageSize: imageSize, spatialSide: spatialSide, inChannels: inChannels)
+        var refPacked: [Float] = []
+        refPacked.reserveCapacity(numRefs * refSeq * inChannels)
+        for ref in referenceImages {
+            refPacked += try await encodeReferenceLatents(
+                encoder: encoder, image: ref,
+                imageSize: imageSize, spatialSide: spatialSide, inChannels: inChannels)
+        }
         if lazyModelLoading { await encoder.unloadResources() }
 
         // 3. Output latents = pure noise (T = 0).
@@ -798,13 +825,14 @@ extension Flux2Pipeline {
         let scheduler = DiscreteFlowScheduler(
             stepCount: stepCount, trainStepCount: 1000, timeStepShift: 1.0, mu: mu, sigmaMax: 1.0)
 
-        // 5. RoPE over [text ; output(T=0) ; reference(T=refTScale)].
+        // 5. RoPE over [text ; output(T=0) ; ref0(T=scale) ; ref1(T=2·scale) ; …].
         let axesDims = descriptor.ropeAxesDims ?? [32, 32, 32, 32]
         let theta = descriptor.ropeTheta ?? Self.defaultRopeTheta
         let (rotaryCos, rotarySin) = computeEditRotaryEmbeddings(
-            outGrid: spatialSide, refGrid: spatialSide, refTScale: refTScale,
+            outGrid: spatialSide, refGrid: spatialSide, numRefs: numRefs, refTScale: refTScale,
             textSeqLen: Self.textSeqLen, axesDims: axesDims, theta: theta)
-        let totalSeqLen = Self.textSeqLen + outSeq + refSeq
+        let totalImageSeq = outSeq + numRefs * refSeq
+        let totalSeqLen = Self.textSeqLen + totalImageSeq
         let totalDim = axesDims.reduce(0, +)
         let ropeShape = [totalSeqLen, totalDim]
 
@@ -813,10 +841,10 @@ extension Flux2Pipeline {
         // 6. Denoise the output; reference tokens re-supplied clean each step, their predictions dropped.
         for (step, t) in scheduler.timeSteps.enumerated() {
             let timestepValue = Float(t) / 1000.0
-            let concat = outputPacked + refPacked   // [1, outSeq + refSeq, inChannels]
+            let concat = outputPacked + refPacked   // [1, outSeq + numRefs*refSeq, inChannels]
 
             let output = try await editTransformer.run(floatInputs: [
-                (concat, [1, outSeq + refSeq, inChannels]),
+                (concat, [1, totalImageSeq, inChannels]),
                 (textEmbeddings, [1, Self.textSeqLen, hDim]),
                 ([timestepValue], [1]),
                 ([guidanceScale], [1]),
@@ -869,20 +897,20 @@ extension Flux2Pipeline {
             normalized, channels: inChannels, height: spatialSide, width: spatialSide)
     }
 
-    /// RoPE for the edit sequence [text ; output(T=0) ; reference(T=refTScale)]. Mirrors
-    /// `computeRotaryEmbeddings` with the added T (image-index) axis (column 0).
+    /// RoPE for the edit sequence [text ; output(T=0) ; ref0(T=scale) ; ref1(T=2·scale) ; …].
+    /// Mirrors `computeRotaryEmbeddings` with the added T (image-index) axis (column 0).
     private func computeEditRotaryEmbeddings(
-        outGrid: Int, refGrid: Int, refTScale: Int,
+        outGrid: Int, refGrid: Int, numRefs: Int, refTScale: Int,
         textSeqLen: Int, axesDims: [Int], theta: Float
     ) -> ([Float], [Float]) {
         let outSeq = outGrid * outGrid
         let refSeq = refGrid * refGrid
-        let totalSeqLen = textSeqLen + outSeq + refSeq
+        let totalSeqLen = textSeqLen + outSeq + numRefs * refSeq
         let totalDim = axesDims.reduce(0, +)
         var cosScalars = [Float](repeating: 0, count: totalSeqLen * totalDim)
         var sinScalars = [Float](repeating: 0, count: totalSeqLen * totalDim)
 
-        // (T, H, W, L) coordinate of token `s` in the [text ; output ; reference] sequence.
+        // (T, H, W, L) coordinate of token `s` in [text ; output ; ref0 ; ref1 ; …].
         func coord(_ s: Int, axis: Int) -> Double {
             if s < textSeqLen { return axis == 3 ? Double(s) : 0.0 }   // text: axis 3 = sequential
             let img = s - textSeqLen
@@ -890,10 +918,12 @@ extension Flux2Pipeline {
                 let h = img / outGrid, w = img % outGrid
                 switch axis { case 1: return Double(h); case 2: return Double(w); default: return 0.0 }
             }
-            let r = img - outSeq                                       // reference block: T = refTScale
-            let h = r / refGrid, w = r % refGrid
+            let r = img - outSeq                                       // reference blocks
+            let refIdx = r / refSeq                                    // which reference (0-based)
+            let within = r % refSeq
+            let h = within / refGrid, w = within % refGrid
             switch axis {
-            case 0: return Double(refTScale)
+            case 0: return Double(refTScale * (refIdx + 1))            // T = scale·(i+1)
             case 1: return Double(h)
             case 2: return Double(w)
             default: return 0.0
