@@ -734,3 +734,193 @@ public struct Flux2Pipeline: DiffusionPipeline {
         return 1.0
     }
 }
+
+// MARK: - In-Context Edit (reference-conditioned instruction editing)
+//
+// STATUS: UNVALIDATED — written against the exported edit graph before it exists (weights
+// downloading). Compiles against the same-file private helpers; correctness must be confirmed
+// by a numeric parity check vs the diffusers Flux2 edit pipeline once `Transformer_edit.aimodel`
+// is exported. Do not ship until that passes.
+//
+// Mechanism (from diffusers `pipeline_flux2_klein`): the transformer attends over a single image
+// sequence built as [output latent tokens (T=0) ; reference image tokens (T=scale)]. Only the
+// output tokens are denoised — the reference tokens are re-supplied clean every step and their
+// predicted velocities are discarded. This is NOT SDEdit: the output starts from pure noise and
+// the reference steers via attention, so the instruction can add/replace/relight content while
+// keeping the subject. Same transformer graph as text-to-image, exported at the longer sequence.
+extension Flux2Pipeline {
+    /// Reference-conditioned instruction edit. `editTransformer` must be the edit-sequence graph
+    /// (`Transformer_edit` / `_512`), exported at (output tokens + one reference image's tokens).
+    /// The reference is encoded at the same grid as the output, so both blocks are `spatialSide`².
+    public func editImages(
+        referenceImage: CGImage,
+        instruction: String,
+        editTransformer: CoreAIDiffusionModelFunction,
+        stepCount: Int = 4,
+        seed: UInt32 = 0,
+        guidanceScale: Float = 1.0,
+        lazyModelLoading: Bool = true,
+        progressHandler: @Sendable (PipelineProgress) -> Bool = { _ in true }
+    ) async throws -> GenerationResult {
+        guard let encoder else {
+            throw NSError(domain: "Flux2Pipeline", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "edit requires a VAE encoder component"])
+        }
+
+        let imageSize = defaultImageSize.width
+        let spatialSide = imageSize / Self.patchSize
+        let inChannels = Self.latentChannels
+        let outSeq = spatialSide * spatialSide          // output (denoised) tokens, T = 0
+        let refSeq = spatialSide * spatialSide          // one reference image, T = refTScale
+        let refTScale = 10                              // matches diffusers _prepare_image_ids scale
+
+        // 1. Instruction text embeddings.
+        let textEmbeddings = try await encodeText(instruction)
+        let hDim = hiddenDim(textEmbeddings)
+
+        // 2. Reference image → clean latent tokens (encode → scale → patchify → BN → pack). No noise.
+        try await encoder.loadResources()
+        let refPacked = try await encodeReferenceLatents(
+            encoder: encoder, image: referenceImage,
+            imageSize: imageSize, spatialSide: spatialSide, inChannels: inChannels)
+        if lazyModelLoading { await encoder.unloadResources() }
+
+        // 3. Output latents = pure noise (T = 0).
+        let noise = generateNoise(count: inChannels * spatialSide * spatialSide, seed: seed)
+        var outputPacked = packLatentsSpatialFlatten(
+            noise, channels: inChannels, height: spatialSide, width: spatialSide)
+
+        // 4. Scheduler over the OUTPUT sequence (full-noise start: sigmaMax = 1.0, not SDEdit).
+        let mu = Self.schedulerBaseShift
+            + (Self.schedulerMaxShift - Self.schedulerBaseShift)
+            * (Float(outSeq) - Self.schedulerBaseSeqLen)
+            / (Self.schedulerMaxSeqLen - Self.schedulerBaseSeqLen)
+        let scheduler = DiscreteFlowScheduler(
+            stepCount: stepCount, trainStepCount: 1000, timeStepShift: 1.0, mu: mu, sigmaMax: 1.0)
+
+        // 5. RoPE over [text ; output(T=0) ; reference(T=refTScale)].
+        let axesDims = descriptor.ropeAxesDims ?? [32, 32, 32, 32]
+        let theta = descriptor.ropeTheta ?? Self.defaultRopeTheta
+        let (rotaryCos, rotarySin) = computeEditRotaryEmbeddings(
+            outGrid: spatialSide, refGrid: spatialSide, refTScale: refTScale,
+            textSeqLen: Self.textSeqLen, axesDims: axesDims, theta: theta)
+        let totalSeqLen = Self.textSeqLen + outSeq + refSeq
+        let totalDim = axesDims.reduce(0, +)
+        let ropeShape = [totalSeqLen, totalDim]
+
+        try await editTransformer.loadResources()
+
+        // 6. Denoise the output; reference tokens re-supplied clean each step, their predictions dropped.
+        for (step, t) in scheduler.timeSteps.enumerated() {
+            let timestepValue = Float(t) / 1000.0
+            let concat = outputPacked + refPacked   // [1, outSeq + refSeq, inChannels]
+
+            let output = try await editTransformer.run(floatInputs: [
+                (concat, [1, outSeq + refSeq, inChannels]),
+                (textEmbeddings, [1, Self.textSeqLen, hDim]),
+                ([timestepValue], [1]),
+                ([guidanceScale], [1]),
+                (rotaryCos, ropeShape),
+                (rotarySin, ropeShape),
+            ])
+
+            // Wrapper returns image tokens only (text stripped); keep the output block, step it.
+            let outputPred = Array(output[0 ..< outSeq * inChannels])
+            outputPacked = scheduler.step(output: outputPred, timeStep: t, sample: outputPacked)
+
+            if !progressHandler(PipelineProgress(step: step + 1, totalSteps: stepCount, currentLatent: nil)) {
+                break
+            }
+        }
+        if lazyModelLoading { await editTransformer.unloadResources() }
+
+        // 7. Decode the output latents.
+        var spatial = unpackLatentsSpatialFlatten(
+            outputPacked, channels: inChannels, height: spatialSide, width: spatialSide)
+        spatial = applyBatchNormDenorm(
+            spatial, channels: inChannels, height: spatialSide, width: spatialSide)
+        let unpatchified = Self.unpatchifyLatents(
+            spatial, channels: inChannels, height: spatialSide, width: spatialSide)
+
+        let vaeChannels = inChannels / 4
+        let vaeShape = [1, vaeChannels, spatialSide * 2, spatialSide * 2]
+        try await decoder.loadResources()
+        let pixels = try await decoder.run(floatInputs: [(unpatchified, vaeShape)])
+        if lazyModelLoading { await decoder.unloadResources() }
+
+        let image = try DiffusionUtilities.pixelsToCGImage(pixels, height: imageSize, width: imageSize)
+        return GenerationResult(images: [image], latents: [])
+    }
+
+    /// Reference image → clean packed latent tokens (the img2img encode, minus the noise blend).
+    private func encodeReferenceLatents(
+        encoder: CoreAIDiffusionModelFunction, image: CGImage,
+        imageSize: Int, spatialSide: Int, inChannels: Int
+    ) async throws -> [Float] {
+        let resized = CGImageUtils.resize(image, to: imageSize) ?? image
+        let pixels = try CGImageUtils.toNormalizedPlanarRGB(resized)
+        let encoded = try await encoder.run(floatInputs: [(pixels, [1, 3, imageSize, imageSize])])
+        let scaled = encoded.map { $0 * (descriptor.encoderScaleFactor ?? 0.18215) }
+        let patchified = Self.patchifyLatents(
+            scaled, inChannels: inChannels, height: spatialSide, width: spatialSide)
+        let normalized = applyBatchNormNorm(
+            patchified, channels: inChannels, height: spatialSide, width: spatialSide)
+        return packLatentsSpatialFlatten(
+            normalized, channels: inChannels, height: spatialSide, width: spatialSide)
+    }
+
+    /// RoPE for the edit sequence [text ; output(T=0) ; reference(T=refTScale)]. Mirrors
+    /// `computeRotaryEmbeddings` with the added T (image-index) axis (column 0).
+    private func computeEditRotaryEmbeddings(
+        outGrid: Int, refGrid: Int, refTScale: Int,
+        textSeqLen: Int, axesDims: [Int], theta: Float
+    ) -> ([Float], [Float]) {
+        let outSeq = outGrid * outGrid
+        let refSeq = refGrid * refGrid
+        let totalSeqLen = textSeqLen + outSeq + refSeq
+        let totalDim = axesDims.reduce(0, +)
+        var cosScalars = [Float](repeating: 0, count: totalSeqLen * totalDim)
+        var sinScalars = [Float](repeating: 0, count: totalSeqLen * totalDim)
+
+        // (T, H, W, L) coordinate of token `s` in the [text ; output ; reference] sequence.
+        func coord(_ s: Int, axis: Int) -> Double {
+            if s < textSeqLen { return axis == 3 ? Double(s) : 0.0 }   // text: axis 3 = sequential
+            let img = s - textSeqLen
+            if img < outSeq {                                          // output block: T = 0
+                let h = img / outGrid, w = img % outGrid
+                switch axis { case 1: return Double(h); case 2: return Double(w); default: return 0.0 }
+            }
+            let r = img - outSeq                                       // reference block: T = refTScale
+            let h = r / refGrid, w = r % refGrid
+            switch axis {
+            case 0: return Double(refTScale)
+            case 1: return Double(h)
+            case 2: return Double(w)
+            default: return 0.0
+            }
+        }
+
+        var axisOffset = 0
+        for (axisIdx, axisDim) in axesDims.enumerated() {
+            let halfDim = axisDim / 2
+            var invFreq = [Double](repeating: 0, count: halfDim)
+            for k in 0..<halfDim {
+                invFreq[k] = 1.0 / pow(Double(theta), Double(2 * k) / Double(axisDim))
+            }
+            for s in 0..<totalSeqLen {
+                let pos = coord(s, axis: axisIdx)
+                let outBase = s * totalDim + axisOffset
+                for k in 0..<halfDim {
+                    let angle = pos * invFreq[k]
+                    let c = Float(cos(angle)), sn = Float(sin(angle))
+                    cosScalars[outBase + 2 * k] = c
+                    cosScalars[outBase + 2 * k + 1] = c
+                    sinScalars[outBase + 2 * k] = sn
+                    sinScalars[outBase + 2 * k + 1] = sn
+                }
+            }
+            axisOffset += axisDim
+        }
+        return (cosScalars, sinScalars)
+    }
+}
