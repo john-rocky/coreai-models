@@ -131,6 +131,7 @@ def export_to_coreai(
     input_names: tuple[str, ...] | None = None,
     output_names: tuple[str, ...] | None = None,
     state_names: tuple[str, ...] | None = None,
+    externalize_modules: list | tuple | None = None,
 ) -> AIProgram:
     """Export a stateful macOS model to a AIProgram.
 
@@ -157,10 +158,19 @@ def export_to_coreai(
         state_names: Names of inputs that are state (i.e. mutated in place by
             the forward pass and surfaced via the runtime ``state=`` kwarg
             rather than as regular inputs/outputs).
+        externalize_modules: Composite-op externalization specs. ``None`` uses
+            the default set (RMSNorm/RoPE/SDPA/GatherMM/GatedDeltaUpdate). Pass an
+            empty list/tuple to DISABLE externalization — required for models
+            whose export unit holds submodules of an externalized class that are
+            NOT in the traced graph (e.g. Gemma 4's decode core keeps the PLE
+            front-end RMSNorms as attributes; externalizing by class would mark
+            them and then fail to find them in the program).
 
     Returns:
         A AIProgram ready for optimization and compilation.
     """
+    if externalize_modules is None:
+        externalize_modules = _EXTERNALIZE_SPECS
     # If the caller didn't pass input_names explicitly, derive them from
     # ``reference_inputs.keys()`` while excluding any name the caller declared
     # as state. This keeps the call to ``add_pytorch_module`` predictable
@@ -187,7 +197,7 @@ def export_to_coreai(
     converter.add_pytorch_module(
         model,
         export_fn=export_fn,
-        externalize_modules=_EXTERNALIZE_SPECS,
+        externalize_modules=list(externalize_modules) or None,
         input_names=input_names,
         output_names=output_names,
         state_names=state_names,
@@ -196,10 +206,61 @@ def export_to_coreai(
     return converter.to_coreai()
 
 
+def export_to_coreai_multifunction(
+    model: torch.nn.Module,
+    entries: "list[tuple[str, dict]]",
+    externalize_modules: list | tuple | None = None,
+) -> AIProgram:
+    """Export several entrypoints of the SAME weights into one AIProgram.
+
+    Each entry is ``(entrypoint_name, spec)`` where ``spec`` carries the same
+    keys the model's ``build_export_spec`` returns (``reference_inputs``,
+    ``dynamic_shapes``, ``input_names``, ``output_names``, ``state_names``).
+    Constants are deduplicated across entrypoints, so a static-chunk prefill
+    function rides next to the S=1 decode function at no weight cost.
+    """
+    if externalize_modules is None:
+        externalize_modules = _EXTERNALIZE_SPECS
+    model.eval()
+    converter = coreai_torch.TorchConverter()
+    for entrypoint_name, spec in entries:
+        reference_inputs = spec["reference_inputs"]
+        state_names = spec.get("state_names")
+        input_names = spec.get("input_names")
+        if input_names is None:
+            state_names_set = set(state_names or ())
+            input_names = tuple(k for k in reference_inputs if k not in state_names_set)
+
+        def export_fn(
+            module: torch.nn.Module,
+            _inputs=reference_inputs,
+            _dyn=spec.get("dynamic_shapes"),
+        ) -> torch.export.ExportedProgram:
+            with torch.no_grad():
+                aten_ep = torch.export.export(
+                    module, args=(), kwargs=_inputs, dynamic_shapes=_dyn)
+            coreaten_ep = aten_ep.run_decompositions(coreai_torch.get_decomp_table())
+            remove_functionalization(coreaten_ep)
+            return coreaten_ep
+
+        converter.add_pytorch_module(
+            model,
+            export_fn=export_fn,
+            externalize_modules=list(externalize_modules) or None,
+            input_names=input_names,
+            output_names=spec.get("output_names"),
+            state_names=state_names,
+            entrypoint_name=entrypoint_name,
+        )
+    register_custom_torch_lowering(converter)
+    return converter.to_coreai()
+
+
 def export_macos_model(
     model: torch.nn.Module,
     config,
     export_config,
+    palettization_config: "dict | None" = None,
 ) -> AIProgram:
     """Export a macOS model to a AIProgram.
 
@@ -212,6 +273,11 @@ def export_macos_model(
         model: A loaded PyTorch model (already in the correct dtype).
         config: HuggingFace model config (used for cache dimensions, vocab size, etc.).
         export_config: An ExportConfig instance (used for max_context_length, etc.).
+        palettization_config: Optional k-means palettization config (the inner
+            ``kmeans_palettization_config`` dict). Applied to the EXTRACTED decode
+            core with its own example inputs — the macOS palettization path for
+            ``export_core()`` models (e.g. Gemma 4). The pipeline defers it here
+            because the export unit is the core, not the input_ids->logits forward.
 
     Returns:
         An optimized AIProgram ready for MLIR quantization and compilation.
@@ -220,22 +286,67 @@ def export_macos_model(
     if max_context_length is None:
         max_context_length = getattr(config, "max_position_embeddings", 2048)
 
-    # Determine target dtype from the model parameters
+    # Models that keep an embedding-gather FRONT-END on the CPU and a separate
+    # head export their inner stateful *core*, not their full input_ids->logits
+    # forward. The core carries its own ``build_macos_export_spec`` (e.g. Gemma 4's
+    # dual KV cache), so exporting it makes the hook below fire; the giant
+    # embedding / per-layer-embedding tables and the tied lm_head stay off-graph
+    # (gathered on the CPU front-end; the head is its own bundle/function).
+    if hasattr(model, "export_core"):
+        logger.info("Routing to model.export_core() (decode core; front-end + head stay separate)")
+        model = model.export_core()
+
+    # Determine target dtype + capture the export unit's externalize opt-out NOW,
+    # before any palettization replaces ``model`` with a finalized module that may
+    # not carry the ``coreai_externalize_specs`` attribute.
     target_dtype = next(model.parameters()).dtype
+    externalize_modules = getattr(model, "coreai_externalize_specs", None)
 
     logger.info(
         f"Exporting macOS model (dtype={target_dtype}, max_context_length={max_context_length})"
     )
 
-    reference_inputs, dynamic_shapes = _build_reference_inputs(
-        model, config, target_dtype, max_context_length
-    )
+    # Hybrid-cache models (e.g. Qwen3.5: KV for full-attention layers + conv/recurrent
+    # SSM state for linear-attention layers) override the uniform-KV reference inputs by
+    # providing `build_macos_export_spec`. Plain attention models use the default path.
+    if hasattr(model, "build_macos_export_spec"):
+        spec = model.build_macos_export_spec(
+            target_dtype=target_dtype,
+            max_context_length=max_context_length,
+            query_len=QUANT_TRACE_QUERY_LEN,
+            offset=QUANT_TRACE_OFFSET,
+            trace_kv_len=TRACE_KV_CACHE_SEQ_LEN,
+        )
+        reference_inputs = spec["reference_inputs"]
+        dynamic_shapes = spec["dynamic_shapes"]
+        input_names = spec["input_names"]
+        output_names = spec["output_names"]
+        state_names = spec["state_names"]
+    else:
+        reference_inputs, dynamic_shapes = _build_reference_inputs(
+            model, config, target_dtype, max_context_length
+        )
+        input_names = ("input_ids", "position_ids")
+        output_names = ("logits",)
+        state_names = (KEY_CACHE_NAME, VALUE_CACHE_NAME)
 
-    input_names = ("input_ids", "position_ids")
-    output_names = ("logits",)
-    state_names = (KEY_CACHE_NAME, VALUE_CACHE_NAME)
+    # Optional weight palettization of the (already-extracted) decode core, using
+    # the core's own example inputs — the macOS palettization path. Deferred here
+    # from the pipeline because the export unit is the core, not the
+    # input_ids->logits forward (see pipeline.py). K-means palettizes only
+    # F.linear/F.conv weights, so RMSNorm/RoPE params stay full precision. For
+    # Gemma 4 E2B this reproduces convert_palettize.py's "all8": ~1.90 GB, exact argmax.
+    if palettization_config is not None:
+        from coreai_models.export.compression import palettize_pytorch_model
+
+        logger.info("Palettizing decode core (macOS, core-signature trace)...")
+        example_inputs = tuple(reference_inputs.values())
+        model = palettize_pytorch_model(model, example_inputs, palettization_config)
 
     logger.info("Exporting model to Core AI dialect...")
+    # ``externalize_modules`` was captured above (before palettization) so the core's
+    # opt-out (e.g. Gemma 4's, which keeps PLE front-end RMSNorms as attributes)
+    # survives. ``None`` -> the default spec set.
     coreai_program = export_to_coreai(
         model,
         reference_inputs,
@@ -243,6 +354,7 @@ def export_macos_model(
         input_names=input_names,
         output_names=output_names,
         state_names=state_names,
+        externalize_modules=externalize_modules,
     )
 
     logger.info("Optimizing AIProgram...")

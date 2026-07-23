@@ -8,6 +8,7 @@
 import ArgumentParser
 import CoreAILanguageModels
 import Foundation
+import Metal
 
 @main
 struct Main {
@@ -40,6 +41,15 @@ struct LLMBenchmark: AsyncParsableCommand {
     @Option(name: .customLong("output-json"), help: "Write summary JSON to file")
     var outputJson: String?
 
+    /// Gemma-4 `tbl` bundles gather the per-layer-embedding table in-graph, so the table
+    /// rides as a STATIC input the app must bind (see
+    /// coreai-models-community/apps/coreai-pipelined-static-inputs.patch — the engine side
+    /// is already in). Point this at the raw dump dir (embed_per_layer.i8 +
+    /// embed_per_layer.scale.f32); without it such a bundle fails at load with a garbage
+    /// per-token 'ple_table' allocation. Ignored for bundles that take no static inputs.
+    @Option(name: .customLong("raw-dir"), help: "PLE table dump dir for gemma4 --tbl bundles")
+    var rawDir: String?
+
     func validate() throws {
         if promptTokens < 1 { throw ValidationError("--prompt-tokens must be >= 1") }
         if generationTokens < 1 { throw ValidationError("--generation-tokens must be >= 1") }
@@ -47,6 +57,32 @@ struct LLMBenchmark: AsyncParsableCommand {
         if !FileManager.default.fileExists(atPath: model) {
             throw ValidationError("Model path not found: \(model)")
         }
+    }
+
+    /// Bind the gemma4 PLE tables as static inputs when --raw-dir is given. Owned shared
+    /// buffers, read once — mirrors what the iOS harness does, so the two platforms measure
+    /// the same configuration.
+    private func makeEngineOptions() throws -> EngineOptions {
+        guard let rawDir else { return EngineOptions() }
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            throw ValidationError("no Metal device")
+        }
+        let dir = URL(fileURLWithPath: rawDir)
+        var buffers: [String: StaticInputBuffer] = [:]
+        for (name, file) in [
+            ("ple_table", "embed_per_layer.i8"), ("ple_scale", "embed_per_layer.scale.f32"),
+        ] {
+            let url = dir.appendingPathComponent(file)
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            guard let buf = device.makeBuffer(length: data.count, options: .storageModeShared)
+            else { throw ValidationError("makeBuffer failed for \(file) (\(data.count) B)") }
+            data.withUnsafeBytes { buf.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+            buffers[name] = StaticInputBuffer(buf)
+        }
+        let total = buffers.values.reduce(0) { $0 + $1.buffer.length }
+        print(String(format: "static tables bound: %@ (%.2f GB)",
+                     buffers.keys.sorted().joined(separator: ", "), Double(total) / 1e9))
+        return EngineOptions(staticInputBuffers: buffers)
     }
 
     func run() async throws {
@@ -69,7 +105,8 @@ struct LLMBenchmark: AsyncParsableCommand {
         print("\n⏳ Preparing AI asset...")
         let engine = try await EngineFactory.createEngine(
             config: configData,
-            modelURL: try bundle.requireModelURL(for: ModelBundle.ComponentKey.main)
+            modelURL: try bundle.requireModelURL(for: ModelBundle.ComponentKey.main),
+            options: try makeEngineOptions()
         )
 
         let prompt = randomPrompt(vocabSize: vocabSize, count: promptTokens, seed: seed)

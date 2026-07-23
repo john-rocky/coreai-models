@@ -35,6 +35,14 @@ let package = Package(
                 "CoreAIObjectDetector"
             ]
         ),
+        // Low-level runtime (PreparedModel, NDArray helpers) — used by our custom
+        // on-device N-state runner in ondevice/CoreAIRunner.
+        .library(
+            name: "CoreAIShared",
+            targets: [
+                "CoreAIShared"
+            ]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.2.0"),
@@ -150,6 +158,18 @@ let package = Package(
                 .enableUpcomingFeature("MemberImportVisibility")
             ]
         ),
+        // DiffusionGemma P4 engine forward gate (real engine path: PreparedModel ->
+        // GPU + expectFrequentReshapes, which Python rt.AIModel.load cannot set).
+        .executableTarget(
+            name: "diffusion-lm-gate",
+            dependencies: [
+                "CoreAIShared"
+            ],
+            path: "swift/Sources/Tools/diffusion-lm-gate",
+            swiftSettings: [
+                .enableUpcomingFeature("MemberImportVisibility")
+            ]
+        ),
 
         // Public LLM Benchmark CLI (based on mlx-lm benchmark)
         .executableTarget(
@@ -185,7 +205,8 @@ let package = Package(
             ],
             path: "swift/Tests/LanguageModelsTests",
             resources: [
-                .copy("Resources/MinimalTokenizer")
+                .copy("Resources/MinimalTokenizer"),
+                .copy("Resources/diffusion_sampler_fixture.json"),
             ],
             linkerSettings: [
                 .linkedLibrary("c++")

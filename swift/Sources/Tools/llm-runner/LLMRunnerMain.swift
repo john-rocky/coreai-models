@@ -9,6 +9,7 @@ import CoreAILanguageModels
 import CoreAIShared
 import Darwin
 import Foundation
+import Metal
 import Tokenizers
 
 /// Warmup mode for inference engines.
@@ -66,6 +67,14 @@ struct LLMRunner: AsyncParsableCommand, Sendable {
 
     @Option(name: .customLong("prompt-file"), help: "Read prompt text from file (UTF-8 text file)")
     var promptFile: String?
+
+    /// Gemma-4 `tbl` bundles gather the per-layer-embedding table in-graph, so it rides as a
+    /// STATIC input the app must bind (engine side is already in — see
+    /// coreai-models-community/apps/coreai-pipelined-static-inputs.patch). Point this at the
+    /// raw dump dir (embed_per_layer.i8 + embed_per_layer.scale.f32); without it such a
+    /// bundle dies at load on a garbage per-token 'ple_table' allocation. Ignored otherwise.
+    @Option(name: .customLong("raw-dir"), help: "PLE table dump dir for gemma4 --tbl bundles")
+    var rawDir: String?
 
     @Option(name: .customLong("raw-tokens"), help: "JSON file with pre-tokenized tokens: {\"tokens\": [...]}")
     var rawTokens: String?
@@ -324,6 +333,28 @@ struct LLMRunner: AsyncParsableCommand, Sendable {
         let samplingConfiguration = try parseSamplingStrategy()
         CLILogger.log("Sampling strategy configured: \(samplingConfiguration)", component: "Main")
 
+        // Bind the gemma4 PLE tables as static inputs when --raw-dir is given (owned shared
+        // buffers, read once) — mirrors the iOS harness so both platforms measure the same
+        // configuration.
+        func loadStaticInputBuffers() throws -> [String: StaticInputBuffer] {
+            guard let rawDir else { return [:] }
+            guard let device = MTLCreateSystemDefaultDevice() else {
+                throw ValidationError("no Metal device")
+            }
+            let dir = URL(fileURLWithPath: rawDir)
+            var buffers: [String: StaticInputBuffer] = [:]
+            for (name, file) in [
+                ("ple_table", "embed_per_layer.i8"), ("ple_scale", "embed_per_layer.scale.f32"),
+            ] {
+                let data = try Data(contentsOf: dir.appendingPathComponent(file), options: .mappedIfSafe)
+                guard let buf = device.makeBuffer(length: data.count, options: .storageModeShared)
+                else { throw ValidationError("makeBuffer failed for \(file)") }
+                data.withUnsafeBytes { buf.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+                buffers[name] = StaticInputBuffer(buf)
+            }
+            return buffers
+        }
+
         // Create inference engine
         CLILogger.log("Creating inference engine...", component: "Main")
 
@@ -331,7 +362,8 @@ struct LLMRunner: AsyncParsableCommand, Sendable {
         let engineOptions = EngineOptions(
             variant: inferenceEngineVariant,
             kvCacheStrategy: kvCacheStrategy,
-            kvCacheSize: kvCacheInitialCapacity
+            kvCacheSize: kvCacheInitialCapacity,
+            staticInputBuffers: try loadStaticInputBuffers()
         )
         let engineConfig = ModelConfig(
             name: bundle.name,

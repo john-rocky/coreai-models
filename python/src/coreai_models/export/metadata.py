@@ -35,6 +35,16 @@ class AIModelMetadataFields:
 # `coreai_models.model_registry`, add a matching entry here.
 _METADATA: dict[str, AIModelMetadataFields] = {
     # ---- LLMs ----
+    "openbmb/MiniCPM5-1B": AIModelMetadataFields(
+        author="OpenBMB",
+        license="Apache-2.0",
+        model_description=(
+            "MiniCPM5-1B is a 1.08B-parameter on-device causal language model "
+            "from OpenBMB, with hybrid (Think / No-Think) reasoning and 128K "
+            "context, reaching 1B-class open-source SOTA. "
+            "Source: https://huggingface.co/openbmb/MiniCPM5-1B"
+        ),
+    ),
     "Qwen/Qwen2.5-1.5B-Instruct": AIModelMetadataFields(
         author="Qwen Team",
         license="Apache-2.0",
@@ -58,6 +68,17 @@ _METADATA: dict[str, AIModelMetadataFields] = {
         model_description=(
             "Qwen3-4B is a 4B-parameter causal language model from the Qwen3 "
             "family. Source: https://huggingface.co/Qwen/Qwen3-4B"
+        ),
+    ),
+    "microsoft/FastContext-1.0-4B-SFT": AIModelMetadataFields(
+        author="Microsoft",
+        license="MIT",
+        model_description=(
+            "FastContext-1.0-4B-SFT is a 4B-parameter long-context repository-"
+            "exploration agent from Microsoft, built on the Qwen3-4B backbone and "
+            "supervised-fine-tuned on exploration traces (broad first-turn search, "
+            "multi-turn evidence gathering, precise citation generation). "
+            "Source: https://huggingface.co/microsoft/FastContext-1.0-4B-SFT"
         ),
     ),
     "Qwen/Qwen3-8B": AIModelMetadataFields(
@@ -93,6 +114,16 @@ _METADATA: dict[str, AIModelMetadataFields] = {
             "Gemma 3 12B IT is a 12B-parameter instruction-tuned multimodal model "
             "from Google's Gemma 3 family; this export targets the text decoder. "
             "Source: https://huggingface.co/google/gemma-3-12b-it"
+        ),
+    ),
+    "google/gemma-4-E2B-it": AIModelMetadataFields(
+        author="Gemma Team",
+        license="Gemma Terms of Use",
+        model_description=(
+            "Gemma 4 E2B IT is a compact instruction-tuned multimodal model from "
+            "Google's Gemma 4 family; this export targets the text decode core "
+            "(the embedding-gather front-end and tied LM head are exported "
+            "separately). Source: https://huggingface.co/google/gemma-4-E2B-it"
         ),
     ),
     "mistralai/Mistral-7B-Instruct-v0.3": AIModelMetadataFields(

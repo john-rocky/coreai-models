@@ -159,6 +159,22 @@ def _resolve_safetensors_files(model_dir: str) -> list[str]:
         )
 
 
+def _any_key_has_prefix(safetensors_files: list[str], prefix: str) -> bool:
+    """Return True if any tensor key in the files starts with ``prefix``.
+
+    Used to decide whether a multimodal state-dict prefix (e.g.
+    ``language_model.``) actually applies to this checkpoint, so a registry
+    entry shared with a text-only checkpoint of the same family degrades
+    gracefully (the text-only checkpoint has no such prefix).
+    """
+    for path in safetensors_files:
+        with safe_open(path, framework="pt", device="cpu") as f:
+            for key in f.keys():  # noqa: SIM118
+                if key.startswith(prefix):
+                    return True
+    return False
+
+
 def _build_safetensors_key_index(
     safetensors_files: list[str],
     num_layers: int | None = None,
@@ -446,7 +462,15 @@ class BaseForCausalLM(torch.nn.Module):
         )
 
         raw_config = AutoConfig.from_pretrained(model_dir)
-        hf_config = getattr(raw_config, hf_config_attr) if hf_config_attr else raw_config
+        # Defensive: a registry entry may be shared by a multimodal checkpoint
+        # (config nests the text model under `hf_config_attr`, weights are keyed
+        # under `hf_state_dict_prefix`) and a text-only checkpoint of the same
+        # family (e.g. gemma-3-1b-it). For the text-only case neither the nested
+        # config nor the prefix is present, so both are skipped.
+        if hf_config_attr and hasattr(raw_config, hf_config_attr):
+            hf_config = getattr(raw_config, hf_config_attr)
+        else:
+            hf_config = raw_config
 
         config = cls._get_reauthored_config(hf_config, max_context_length, num_layers=num_layers)
 
@@ -454,6 +478,8 @@ class BaseForCausalLM(torch.nn.Module):
         model.to(dtype=target_dtype)
 
         safetensors_files = _resolve_safetensors_files(model_dir)
+        if hf_state_dict_prefix and not _any_key_has_prefix(safetensors_files, hf_state_dict_prefix):
+            hf_state_dict_prefix = ""
         per_layer_index, shared_index = _build_safetensors_key_index(
             safetensors_files,
             num_layers=num_layers,

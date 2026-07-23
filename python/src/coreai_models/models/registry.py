@@ -10,6 +10,18 @@ from functools import lru_cache
 
 import torch.nn as nn
 
+# Importing the config shim registers the Qwen3.5 configs with transformers
+# AutoConfig (the 4.57 export env has no built-in qwen3_5), so the export
+# pipeline's `AutoConfig.from_pretrained` can parse the checkpoint.
+from coreai_models.models.macos import qwen3_5_config as _qwen3_5_config  # noqa: F401
+
+# Likewise register gemma4 / gemma4_text with AutoConfig on import (4.57 has no gemma4).
+from coreai_models.models.macos import gemma4_config_shim as _gemma4_config_shim  # noqa: F401
+
+# Register the inner `ministral3` text config type so AutoConfig can parse the
+# Ministral-3 (mistral3 multimodal) checkpoint.
+from coreai_models.models.macos import ministral3_config_shim as _ministral3_config_shim  # noqa: F401
+
 
 @dataclass
 class ModelEntry:
@@ -31,21 +43,39 @@ class ModelEntry:
 def _get_registry() -> dict[str, ModelEntry]:
     """Build the model registry (cached singleton). Lazy imports to avoid circular deps."""
     from coreai_models.models.ios.mistral import MistralForCausalLMForiOS
+    from coreai_models.models.ios.olmo2 import Olmo2ForCausalLMForiOS
+    from coreai_models.models.ios.phi3 import Phi3ForCausalLMForiOS
     from coreai_models.models.ios.qwen2 import Qwen2ForCausalLMForiOS
     from coreai_models.models.ios.qwen3 import Qwen3ForCausalLMForiOS
+    from coreai_models.models.ios.smollm3 import SmolLM3ForCausalLMForiOS
     from coreai_models.models.macos.gemma3_text import Gemma3ForCausalLM
+    from coreai_models.models.macos.gemma4_text import Gemma4TextForCausalLM
     from coreai_models.models.macos.gpt_oss import GptOssForCausalLM
+    from coreai_models.models.macos.ministral3 import Ministral3ForCausalLM
     from coreai_models.models.macos.mistral import MistralForCausalLM
     from coreai_models.models.macos.mixtral import MixtralForCausalLM
+    from coreai_models.models.macos.olmo2 import Olmo2ForCausalLM
+    from coreai_models.models.macos.phi3 import Phi3ForCausalLM
     from coreai_models.models.macos.qwen2 import Qwen2ForCausalLM
     from coreai_models.models.macos.qwen3 import Qwen3ForCausalLM
+    from coreai_models.models.macos.qwen3_5 import Qwen3_5StatefulForCausalLM
     from coreai_models.models.macos.qwen3_moe import Qwen3MoeForCausalLM
+    from coreai_models.models.macos.smollm3 import SmolLM3ForCausalLM
 
     return {
         "gemma3_text": ModelEntry(
             macos_class=Gemma3ForCausalLM,
             hf_config_attr="text_config",
             hf_state_dict_prefix="language_model.",
+        ),
+        # Gemma 4 E2B/E4B text decoder (community port). Multimodal checkpoint:
+        # text weights nest under "model.language_model."; dual head_dim + KV
+        # sharing + PLE handled in the re-authored module. AutoConfig needs the
+        # gemma4 shim (transformers 4.57 predates gemma4) — registered on lookup.
+        "gemma4_text": ModelEntry(
+            macos_class=Gemma4TextForCausalLM,
+            hf_config_attr="text_config",
+            hf_state_dict_prefix="model.language_model.",
         ),
         "gpt_oss": ModelEntry(
             macos_class=GptOssForCausalLM,
@@ -56,6 +86,25 @@ def _get_registry() -> dict[str, ModelEntry]:
         ),
         "mixtral": ModelEntry(
             macos_class=MixtralForCausalLM,
+        ),
+        # Ministral-3 multimodal (mistral3) checkpoint: export the FP8 text
+        # decoder nested under text_config / language_model.
+        "mistral3": ModelEntry(
+            macos_class=Ministral3ForCausalLM,
+            hf_config_attr="text_config",
+            hf_state_dict_prefix="language_model.",
+        ),
+        "olmo2": ModelEntry(
+            macos_class=Olmo2ForCausalLM,
+            ios_class=Olmo2ForCausalLMForiOS,
+        ),
+        "phi3": ModelEntry(
+            macos_class=Phi3ForCausalLM,
+            ios_class=Phi3ForCausalLMForiOS,
+        ),
+        "smollm3": ModelEntry(
+            macos_class=SmolLM3ForCausalLM,
+            ios_class=SmolLM3ForCausalLMForiOS,
         ),
         "qwen2": ModelEntry(
             macos_class=Qwen2ForCausalLM,
@@ -68,6 +117,13 @@ def _get_registry() -> dict[str, ModelEntry]:
         "qwen3_moe": ModelEntry(
             macos_class=Qwen3MoeForCausalLM,
         ),
+        # Qwen3.5 hybrid linear/full-attention text decoder (community port).
+        # Text weights nest under "model.language_model." in the multimodal ckpt.
+        "qwen3_5_text": ModelEntry(
+            macos_class=Qwen3_5StatefulForCausalLM,
+            hf_config_attr="text_config",
+            hf_state_dict_prefix="model.language_model.",
+        ),
     }
 
 
@@ -75,6 +131,15 @@ def _get_registry() -> dict[str, ModelEntry]:
 MODEL_TYPE_REMAPPING: dict[str, str] = {
     "gemma3": "gemma3_text",
     "qwen2_5": "qwen2",
+    # Plain LlamaForCausalLM (e.g. MiniCPM5-1B) is architecturally identical to
+    # Mistral minus the sliding window: GQA + RoPE + RMSNorm + SiLU, no qkv bias,
+    # no qk-norm, explicit head_dim honored by the Mistral builder.
+    "llama": "mistral",
+    # The Qwen3.5 checkpoint's top-level model_type is the VLM "qwen3_5"; we
+    # export its text decoder.
+    "qwen3_5": "qwen3_5_text",
+    # Gemma 4's top-level multimodal model_type -> text decoder.
+    "gemma4": "gemma4_text",
 }
 
 

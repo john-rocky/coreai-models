@@ -114,6 +114,117 @@ class YarnRoPE(torch.nn.Module):
         )
 
 
+class Llama3RoPE(torch.nn.Module):
+    """Llama-3 RoPE frequency rescaling (`rope_type: "llama3"`).
+
+    Mirrors HuggingFace `_compute_llama3_parameters`: the default inverse
+    frequencies are rescaled per-dimension — low-frequency components are
+    divided by `factor`, high-frequency components are untouched, and a smooth
+    ramp interpolates in between. `attention_scaling` is 1.0, so no logit
+    rescaling is needed. The resulting inv_freq is fed to the base RoPE op as
+    `freqs` (angle = position * freqs).
+    """
+
+    def __init__(
+        self: Self,
+        dims: int,
+        base: float,
+        factor: float,
+        low_freq_factor: float,
+        high_freq_factor: float,
+        original_max_position_embeddings: int,
+        interleaved: bool = False,
+    ) -> None:
+        super().__init__()
+        with torch.device("cpu"):
+            inv_freq = 1.0 / (
+                base ** (torch.arange(0, dims, 2, dtype=torch.float32) / dims)
+            )
+            low_freq_wavelen = original_max_position_embeddings / low_freq_factor
+            high_freq_wavelen = original_max_position_embeddings / high_freq_factor
+            wavelen = 2 * math.pi / inv_freq
+
+            inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+            smooth_factor = (original_max_position_embeddings / wavelen - low_freq_factor) / (
+                high_freq_factor - low_freq_factor
+            )
+            smoothed_inv_freq = (
+                1 - smooth_factor
+            ) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+            is_medium_freq = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+            inv_freq_llama = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+
+            self._freqs = inv_freq_llama
+            self._rope = RoPE(scale=1.0, interleaved=interleaved)
+
+    def forward(
+        self: Self,
+        x: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
+        offset: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self._rope(x, position_ids=position_ids, freqs=self._freqs, offset=offset)
+
+
+class LongRoPE(torch.nn.Module):
+    """LongRoPE (`rope_type: "longrope"`, e.g. Phi-4-mini), short-factor regime.
+
+    Two Phi-specific features are handled:
+      * **Partial rotary** — only the first ``rotary_dim`` (= head_dim *
+        partial_rotary_factor) dims are rotated; the rest pass through. The base
+        RoPE op does this natively via ``dims=rotary_dim``.
+      * **LongRoPE rescale + attention scaling** — inv_freq is divided by the
+        per-dim ``short_factor``; cos/sin are scaled by ``attention_scaling``.
+        Since attention_scaling distributes over the rotation, it is applied as
+        a per-dim multiply on the rotary output (1.0 on the pass-through dims),
+        which is torch.export-friendly (no partial sliced assignment).
+
+    Only the short-factor branch is materialized — correct for context lengths
+    up to ``original_max_position_embeddings`` (the benchmark regime). The
+    long-factor branch (positions beyond that) is not wired.
+    """
+
+    def __init__(
+        self: Self,
+        head_dim: int,
+        rotary_dim: int,
+        base: float,
+        short_factor: list[float],
+        attention_scaling: float = 1.0,
+        interleaved: bool = False,
+    ) -> None:
+        super().__init__()
+        with torch.device("cpu"):
+            ext = torch.tensor(short_factor, dtype=torch.float32)
+            inv_freq = 1.0 / (
+                ext * base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+            )
+            self._freqs = inv_freq
+            self._rope = RoPE(scale=1.0, dims=rotary_dim, interleaved=interleaved)
+            scale_vec = torch.ones(head_dim, dtype=torch.float32)
+            scale_vec[:rotary_dim] = attention_scaling
+            self._scale_vec = scale_vec
+
+    def forward(
+        self: Self,
+        x: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
+        offset: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        out = self._rope(x, position_ids=position_ids, freqs=self._freqs, offset=offset)
+        return out * self._scale_vec.to(out.dtype)
+
+
+def compute_longrope_attention_scaling(
+    max_position_embeddings: int, original_max_position_embeddings: int
+) -> float:
+    """HuggingFace `_compute_longrope_parameters` attention factor."""
+    factor = max_position_embeddings / original_max_position_embeddings
+    if factor <= 1.0:
+        return 1.0
+    return math.sqrt(1 + math.log(factor) / math.log(original_max_position_embeddings))
+
+
 def initialize_rope(
     dims: int | None = None,
     base: float = 1e4,
@@ -131,6 +242,22 @@ def initialize_rope(
         case "default" | "linear":
             scale = 1 / scaling_config["factor"] if rope_type == "linear" else 1.0
             rope = RoPE(scale=float(scale), base=float(base), dims=dims, interleaved=interleaved)
+
+        case "llama3":
+            if dims is None:
+                msg = "dims is required for llama3 rope"
+                raise ValueError(msg)
+            rope = Llama3RoPE(
+                dims,
+                base=float(base),
+                factor=float(scaling_config["factor"]),
+                low_freq_factor=float(scaling_config["low_freq_factor"]),
+                high_freq_factor=float(scaling_config["high_freq_factor"]),
+                original_max_position_embeddings=int(
+                    scaling_config["original_max_position_embeddings"]
+                ),
+                interleaved=interleaved,
+            )
 
         case "yarn":
             if dims is None:

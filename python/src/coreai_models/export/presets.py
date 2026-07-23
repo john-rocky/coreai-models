@@ -108,6 +108,34 @@ MACOS_PRESETS: dict[str, dict[str, Any]] = {
         "suffix": "4bit",
         "description": "INT4 symmetric per-block weight quantization (torch pre-export)",
     },
+    # ---------------------------------------------------------------
+    # INT8 k-means weight palettization (decode-core models only).
+    # Applied to the extracted decode CORE inside export_macos_model (not the
+    # input_ids->logits forward), so it only takes effect for models exposing
+    # `export_core()` (currently Gemma 4). For Gemma 4 E2B this is the verified
+    # "all8" recipe: exact 8/8 HF argmax at ~1.90 GB (vs 3.5 GB fp16) — see
+    # gemma4/convert_palettize.py. Only F.linear/F.conv weights are palettized,
+    # so RMSNorm/RoPE/SDPA params stay full precision automatically.
+    # ---------------------------------------------------------------
+    "int8": {
+        "torch_palettization_config": {
+            "global_config": {
+                "op_state_spec": {
+                    "weight": {
+                        "n_bits": 8,
+                        "granularity": {
+                            "type": "per_grouped_channel",
+                            "axis": 0,
+                            "group_size": 32,
+                        },
+                    }
+                }
+            },
+        },
+        "suffix": "int8",
+        "description": "INT8 k-means group-32 weight palettization of the decode core "
+        "(decode-core models, e.g. gemma4; ~half fp16 size, exact argmax)",
+    },
 }
 
 IOS_PRESETS: dict[str, dict[str, Any]] = {

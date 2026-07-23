@@ -27,6 +27,8 @@ from coreai_models.diffusion.flux2 import (
     dummy_flux2_text_encoder,
     dummy_flux2_transformer,
     dummy_flux2_transformer_512,
+    dummy_flux2_transformer_edit,
+    dummy_flux2_transformer_edit_512,
     dummy_flux2_vae_decoder,
     dummy_flux2_vae_decoder_half,
     dummy_flux2_vae_encoder,
@@ -319,6 +321,39 @@ FLUX2_COMPONENTS: dict[str, ComponentSpec] = {
         output_names=("output",),
         wrapper_fn=lambda p: Flux2TransformerPrecomputedRoPEWrapper(p.transformer),
         dummy_fn=dummy_flux2_transformer_512,
+        quantizable=True,
+    ),
+    # In-context edit transformers — same graph/wrapper as `transformer`, exported at the
+    # longer edit sequence (output latent + one reference image). The runtime feeds the
+    # concatenated latents and the (T,H,W,L) id layout; RoPE is precomputed and passed in.
+    "transformer_edit": ComponentSpec(
+        asset_name="Transformer_edit",
+        input_names=(
+            "hidden_states",
+            "encoder_hidden_states",
+            "timestep",
+            "guidance",
+            "rotary_emb_cos",
+            "rotary_emb_sin",
+        ),
+        output_names=("output",),
+        wrapper_fn=lambda p: Flux2TransformerPrecomputedRoPEWrapper(p.transformer),
+        dummy_fn=dummy_flux2_transformer_edit,
+        quantizable=True,
+    ),
+    "transformer_edit_512": ComponentSpec(
+        asset_name="Transformer_edit_512",
+        input_names=(
+            "hidden_states",
+            "encoder_hidden_states",
+            "timestep",
+            "guidance",
+            "rotary_emb_cos",
+            "rotary_emb_sin",
+        ),
+        output_names=("output",),
+        wrapper_fn=lambda p: Flux2TransformerPrecomputedRoPEWrapper(p.transformer),
+        dummy_fn=dummy_flux2_transformer_edit_512,
         quantizable=True,
     ),
     "text_encoder": ComponentSpec(

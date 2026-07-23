@@ -35,8 +35,18 @@ def bundle_llm_asset(
 
 def _write_tokenizer(dest: Path, hf_model_id: str) -> None:
     logger.info(f"Saving tokenizer from {hf_model_id}...")
-    tokenizer = AutoTokenizer.from_pretrained(hf_model_id)
-    tokenizer.save_pretrained(str(dest))
+    # A tokenizer that can't be auto-loaded (e.g. a transformers version that
+    # predates the model's tokenizer, or a parsing bug) must NOT discard an
+    # otherwise-successful multi-GB model export. Warn and continue — the
+    # tokenizer can be added to the bundle separately.
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(hf_model_id)
+        tokenizer.save_pretrained(str(dest))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"Could not bundle tokenizer for {hf_model_id} ({type(e).__name__}: {e}). "
+            f"The model exported fine; add the tokenizer to {dest} manually."
+        )
 
 
 def _write_metadata(

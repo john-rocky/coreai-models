@@ -49,6 +49,12 @@ struct DiffusionRunner: AsyncParsableCommand {
     @Option(help: "Path to input image for image-to-image generation")
     var inputImage: String?
 
+    @Option(help: "Path to reference image for FLUX.2 in-context editing (requires Transformer_edit.aimodel)")
+    var editImage: String?
+
+    @Option(help: "Edit instruction for FLUX.2 in-context editing (used with --edit-image)")
+    var instruction: String = ""
+
     @Option(
         help:
             "Denoising strength for image-to-image, 0.0–1.0 (default: 0.85). Use 0.8–0.9 for semantic edits, 0.5–0.75 for style/texture changes."
@@ -132,6 +138,34 @@ struct DiffusionRunner: AsyncParsableCommand {
 
         if isFlux2 {
             let pipeline = try await Flux2Pipeline(from: modelURL, config: configSource, mode: decodeResolution)
+
+            // In-context edit path: reference image + instruction via the edit-sequence transformer.
+            if let editPath = editImage {
+                guard let refImg = loadCGImage(from: URL(fileURLWithPath: editPath)) else {
+                    print("Error: could not load edit image at \(editPath)")
+                    throw ExitCode.failure
+                }
+                let editName = decodeResolution == .half ? "Transformer_edit_512.aimodel" : "Transformer_edit.aimodel"
+                let editTransformer = CoreAIDiffusionModelFunction(
+                    modelURL: modelURL.appendingPathComponent(editName))
+                print("Editing (FLUX.2): \"\(instruction)\"  [\(editName)]")
+                print("Steps: \(effectiveSteps), Seed: \(seed)")
+                let start = ContinuousClock.now
+                let result = try await pipeline.editImages(
+                    referenceImage: refImg, instruction: instruction, editTransformer: editTransformer,
+                    stepCount: effectiveSteps, seed: seed, guidanceScale: effectiveGuidance
+                ) { progress in
+                    print("  Step \(progress.step)/\(progress.totalSteps)")
+                    return true
+                }
+                print("Edited in \(String(format: "%.2f", (ContinuousClock.now - start).inSeconds))s")
+                guard let image = result.images.first else {
+                    print("Error: No image generated"); throw ExitCode.failure
+                }
+                try saveImage(image, to: URL(fileURLWithPath: output))
+                print("Saved: \(output)")
+                return
+            }
 
             print("Generating (FLUX.2): \"\(prompt)\"")
             print("Steps: \(effectiveSteps), Guidance: \(effectiveGuidance), Seed: \(seed)")

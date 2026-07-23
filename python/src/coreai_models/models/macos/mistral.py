@@ -11,7 +11,7 @@ from transformers.models.mistral.modeling_mistral import (
 )
 from typing_extensions import Self, override
 
-from coreai_models._hf import resolve_rope_theta
+from coreai_models._hf import is_default_rope_scaling, resolve_rope_theta
 from coreai_models.models.base import BaseForCausalLM
 from coreai_models.primitives.macos.cache import KVCache
 from coreai_models.primitives.macos.mlp import MLP
@@ -20,6 +20,42 @@ from coreai_models.primitives.macos.rope import initialize_rope
 from coreai_models.primitives.macos.sdpa import SDPA
 
 USE_FUSED_KV = True
+
+
+def _resolve_scaling_config(config) -> dict | None:
+    """Return the active non-default RoPE scaling dict, or None.
+
+    Prefers `rope_scaling` (Llama-3 carries `llama3` here); falls back to
+    `rope_parameters` (Ministral-3 carries `yarn` there). Returns None for
+    default/absent scaling so the default RoPE path is byte-identical."""
+    scaling = getattr(config, "rope_scaling", None)
+    if isinstance(scaling, dict) and not is_default_rope_scaling(config):
+        return scaling
+    rp = getattr(config, "rope_parameters", None)
+    if isinstance(rp, dict) and (rp.get("rope_type") or rp.get("type", "default")) != "default":
+        return rp
+    return None
+
+
+def _make_rope(config) -> nn.Module:
+    """Build a RoPE module, honoring non-trivial RoPE scaling (`llama3`,
+    `linear`, `yarn`) from either `rope_scaling` or `rope_parameters`. For
+    default/absent scaling this is byte-identical to the previous
+    `initialize_rope(base=...)` call, so models on the shared Mistral path
+    (plain Mistral, the `llama` remap, …) are unaffected."""
+    scaling = _resolve_scaling_config(config)
+    if scaling is None:
+        return initialize_rope(base=resolve_rope_theta(config))
+    # yarn carries its own theta in the scaling dict (e.g. Ministral 1e6); the
+    # top-level rope_theta is the MistralConfig default (1e4) and must not win.
+    base = scaling.get("rope_theta") or resolve_rope_theta(config)
+    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+    return initialize_rope(
+        dims=head_dim,
+        base=base,
+        scaling_config=scaling,
+        max_position_embeddings=getattr(config, "max_position_embeddings", None),
+    )
 
 
 class Attention(nn.Module):
@@ -40,7 +76,7 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(n_heads * head_dim, dim, bias=False)
 
         self.sdpa = SDPA(is_causal=True)
-        self.rope = initialize_rope(base=resolve_rope_theta(config))
+        self.rope = _make_rope(config)
 
     def forward(
         self,

@@ -150,6 +150,18 @@ public struct PreparedModel: Sendable {
         )
     }
 
+    /// Prepare with EXPLICIT specialization options (overrides the auto-derived ones). Used to
+    /// probe whether the auto `expectFrequentReshapes` (set for dynamic models) is what makes a
+    /// reused graph return zeros on its 2nd+ run (DiffusionGemma P5 reuse bug).
+    public static func prepare(
+        at url: URL,
+        options: SpecializationOptions
+    ) async throws -> PreparedModel {
+        let model = try await AIModel(contentsOf: url, options: options)
+        let structure = detectStructure(from: model.functionNames)
+        return PreparedModel(model: model, structure: structure)
+    }
+
     // MARK: - Structure Probing (pre-specialization)
 
     /// Probes model structure via `AIModelAsset.summary()` without triggering specialization.

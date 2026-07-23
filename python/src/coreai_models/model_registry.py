@@ -82,6 +82,8 @@ LLM_PRESETS: list[ModelPreset] = [
     ),
     ModelPreset("qwen3-0.6b", "Qwen/Qwen3-0.6B", "qwen3", "llm", "macOS", "4bit", "float16", 8192),
     ModelPreset("qwen3-4b", "Qwen/Qwen3-4B", "qwen3", "llm", "macOS", "4bit", "float16", 40960),
+    ModelPreset("fastcontext-4b", "microsoft/FastContext-1.0-4B-SFT", "qwen3", "llm", "macOS", "4bit", "float16", 40960,
+                notes="Qwen3-4B-arch long-context repo-exploration agent (Microsoft, MIT)."),
     ModelPreset("qwen3-8b", "Qwen/Qwen3-8B", "qwen3", "llm", "macOS", "4bit", "float16", 40960),
     ModelPreset(
         "qwen3-coder-30b-a3b-instruct",
@@ -105,6 +107,24 @@ LLM_PRESETS: list[ModelPreset] = [
         "4bit",
         "bfloat16",
         131072,
+    ),
+    # Gemma 4 E2B (community port). Exports the stateful text DECODE CORE; the giant
+    # embedding-gather front-end and the tied LM head are separate units (see
+    # gemma4/ONDEVICE_DESIGN.md). compression="none" (fp16, ~3.5 GB shippable): the
+    # 4bit macOS quantization path traces input_ids->logits, which doesn't match the
+    # core's (inputs_embeds, per_layer_inputs, position_ids, +KV state) signature, and
+    # int4 can't reach exact HF argmax anyway — the verified compressed point is int8
+    # k-means palettization (gemma4/convert_palettize.py all8 = 1.90 GB).
+    ModelPreset(
+        "gemma-4-e2b",
+        "google/gemma-4-E2B-it",
+        "gemma4",
+        "llm",
+        "macOS",
+        "none",
+        "float16",
+        32768,
+        notes="Text decode core; front-end gather + tied head exported separately.",
     ),
     ModelPreset(
         "mistral-7b-instruct-v0.3",
@@ -160,6 +180,19 @@ LLM_PRESETS: list[ModelPreset] = [
         "none",
         "float16",
         4096,
+        compression_config="models/qwen3/qwen3_4b_mixed_4bit_8bit.yaml",
+    ),
+    ModelPreset(
+        "fastcontext-4b",
+        "microsoft/FastContext-1.0-4B-SFT",
+        "qwen3",
+        "llm",
+        "iOS",
+        "none",
+        "float16",
+        4096,
+        # Same Qwen3-4B architecture, so the curated qwen3-4b mixed 4/8 palettized
+        # (ANE-safe) recipe applies unchanged.
         compression_config="models/qwen3/qwen3_4b_mixed_4bit_8bit.yaml",
     ),
 ]

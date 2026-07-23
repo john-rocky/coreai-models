@@ -139,8 +139,11 @@ async def _async_export_model(config: ExportConfig) -> str:
     entry = get_model_entry(model_type)
 
     # Unwrap the per-modality sub-config (e.g. Gemma-3 wraps the text
-    # model under `text_config`)
-    if entry.hf_config_attr:
+    # model under `text_config`). Applied defensively: a registry entry may be
+    # shared by both a multimodal checkpoint (has `text_config`) and a text-only
+    # checkpoint of the same family (e.g. gemma-3-1b-it, whose config is already
+    # a Gemma3TextConfig). For the latter there is nothing to unwrap.
+    if entry.hf_config_attr and hasattr(hf_config, entry.hf_config_attr):
         hf_config = getattr(hf_config, entry.hf_config_attr)
 
     if config.variant == "iOS" and entry.ios_class is None:
@@ -269,6 +272,18 @@ async def _async_export_model(config: ExportConfig) -> str:
                 calibration_data_fn=get_calibration_data,
                 mmap_dir=quantizer_mmap_dir,
             )
+        # Decode-core models (e.g. gemma4) expose `export_core()`: their export
+        # unit is the inner stateful decode core (inputs_embeds / per_layer_inputs /
+        # position_ids + KV state), NOT the input_ids->logits forward. Palettizing
+        # here with the iOS input_ids-shaped trace would build the wrong graph and
+        # pull the giant embedding tables, so defer palettization to
+        # export_macos_model, which palettizes the EXTRACTED core with its own
+        # example inputs. This is the only macOS palettization path.
+        deferred_palettization_config = None
+        if torch_palettization_config is not None and hasattr(model, "export_core"):
+            deferred_palettization_config = torch_palettization_config
+            torch_palettization_config = None
+
         if torch_palettization_config is not None:
             assert config.variant == "iOS", "palettization is only supported for iOS variant."
 
@@ -304,7 +319,9 @@ async def _async_export_model(config: ExportConfig) -> str:
 
         # ---- 4. Variant-specific export ----
         if config.variant == "macOS":
-            coreai_program = export_macos_model(model, hf_config, config)
+            coreai_program = export_macos_model(
+                model, hf_config, config, palettization_config=deferred_palettization_config
+            )
         else:
             coreai_program = await export_ios_model(model, hf_config, config)
 

@@ -10,7 +10,7 @@ from transformers.models.mistral.modeling_mistral import (
     MistralForCausalLM as HFMistralForCausalLM,
 )
 
-from coreai_models._hf import resolve_rope_theta
+from coreai_models._hf import is_default_rope_scaling, resolve_rope_theta
 from coreai_models.models.base import BaseForCausalLMForiOS
 from coreai_models.primitives.ios.cache import KVCacheHandler
 from coreai_models.primitives.ios.mlp import MLP
@@ -19,8 +19,31 @@ from coreai_models.primitives.ios.quantization import (
     quantize_per_tensor,
 )
 from coreai_models.primitives.ios.rms_norm import RMSNorm
-from coreai_models.primitives.ios.rope import RoPECache, apply_rope
+from coreai_models.primitives.ios.rope import RoPECache, apply_rope, compute_llama3_inv_freq
 from coreai_models.primitives.ios.sdpa import SDPA
+
+
+def _make_rope_cache(config, head_dim: int, max_cache_size: int) -> RoPECache:
+    """Build a RoPECache honoring non-trivial `rope_scaling` (llama3). Default /
+    absent scaling reproduces the previous `RoPECache(head_dim, max, theta)`
+    exactly, so models on the shared path are unaffected."""
+    base = resolve_rope_theta(config)
+    if is_default_rope_scaling(config):
+        return RoPECache(head_dim, max_cache_size, base)
+    scaling = config.rope_scaling
+    rope_type = scaling.get("rope_type") or scaling.get("type")
+    if rope_type == "llama3":
+        inv_freq = compute_llama3_inv_freq(
+            head_dim,
+            base,
+            float(scaling["factor"]),
+            float(scaling["low_freq_factor"]),
+            float(scaling["high_freq_factor"]),
+            int(scaling["original_max_position_embeddings"]),
+        )
+        return RoPECache(head_dim, max_cache_size, base, inv_freq=inv_freq, attention_scaling=1.0)
+    # Other scaling types (yarn, longrope, …) are not yet wired on iOS.
+    return RoPECache(head_dim, max_cache_size, base)
 
 
 class Attention(nn.Module):
@@ -183,8 +206,7 @@ class MistralExtend(nn.Module):
         head_dim = (
             getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
         )
-        rope_theta = resolve_rope_theta(config)
-        self.rope = RoPECache(head_dim, config.max_position_embeddings, rope_theta)
+        self.rope = _make_rope_cache(config, head_dim, config.max_position_embeddings)
 
     def forward(
         self,

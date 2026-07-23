@@ -3,9 +3,68 @@
 # Use of this source code is governed by a BSD-3-clause license that can
 # be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
+import math
 import os
 
 import torch
+
+
+def compute_llama3_inv_freq(
+    head_dim: int,
+    base: float,
+    factor: float,
+    low_freq_factor: float,
+    high_freq_factor: float,
+    original_max_position_embeddings: int,
+) -> torch.Tensor:
+    """Llama-3 RoPE inverse-frequency rescaling (`rope_type: "llama3"`).
+
+    Mirrors HuggingFace `_compute_llama3_parameters` and the macOS
+    `Llama3RoPE`. Returns the per-dim inv_freq (length head_dim/2, fp32).
+    """
+    # Force CPU: this may run inside a `torch.device("meta")` init context
+    # (BaseForCausalLM builds the module tree on meta), and the inv_freq must be
+    # a real CPU tensor so RoPECache can build its cos/sin cache.
+    with torch.device("cpu"):
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+        low_freq_wavelen = original_max_position_embeddings / low_freq_factor
+        high_freq_wavelen = original_max_position_embeddings / high_freq_factor
+        wavelen = 2 * math.pi / inv_freq
+        inv_freq_llama = torch.where(wavelen > low_freq_wavelen, inv_freq / factor, inv_freq)
+        smooth_factor = (original_max_position_embeddings / wavelen - low_freq_factor) / (
+            high_freq_factor - low_freq_factor
+        )
+        smoothed_inv_freq = (
+            1 - smooth_factor
+        ) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+        is_medium_freq = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
+        return torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+
+
+def compute_longrope_inv_freq(
+    rotary_dim: int,
+    base: float,
+    short_factor: list[float],
+) -> torch.Tensor:
+    """LongRoPE inverse frequencies (short-factor regime), length rotary_dim/2.
+
+    Mirrors HuggingFace `_compute_longrope_parameters`: inv_freq is the default
+    schedule divided per-dim by `short_factor`. CPU-forced for meta-device init.
+    """
+    with torch.device("cpu"):
+        ext = torch.tensor(short_factor, dtype=torch.float32)
+        return 1.0 / (
+            ext * base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+        )
+
+
+def compute_longrope_attention_scaling(
+    max_position_embeddings: int, original_max_position_embeddings: int
+) -> float:
+    factor = max_position_embeddings / original_max_position_embeddings
+    if factor <= 1.0:
+        return 1.0
+    return math.sqrt(1 + math.log(factor) / math.log(original_max_position_embeddings))
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -50,6 +109,19 @@ def apply_rope(x: torch.Tensor, rope_cos: torch.Tensor, rope_sin: torch.Tensor) 
     return (x * rope_cos) + (rotate_half(x) * rope_sin)
 
 
+def apply_rope_partial(
+    x: torch.Tensor, rope_cos: torch.Tensor, rope_sin: torch.Tensor, rotary_dim: int
+) -> torch.Tensor:
+    """Partial rotary (Phi-4-mini): rotate only the first ``rotary_dim`` of each
+    head, pass the remaining dims through unchanged. ``rope_cos``/``rope_sin``
+    must be sized to ``rotary_dim`` (built from a length-``rotary_dim/2``
+    inv_freq)."""
+    x_rot = x[..., :rotary_dim]
+    x_pass = x[..., rotary_dim:]
+    x_rot = apply_rope(x_rot, rope_cos, rope_sin)
+    return torch.cat((x_rot, x_pass), dim=-1)
+
+
 # On iOS, it is more efficient to compute RoPE using precomputed and cached cos/sin values
 class RoPECache(torch.nn.Module):
     """
@@ -63,11 +135,20 @@ class RoPECache(torch.nn.Module):
         head_dim: int,
         max_cache_size: int,
         base: float = 500_000,
+        inv_freq: torch.Tensor | None = None,
+        attention_scaling: float = 1.0,
     ) -> None:
         super().__init__()
         self._head_dim = head_dim
         self._max_cache_size = max_cache_size
         self._base = base
+        # Optional precomputed per-dim inverse frequencies (length head_dim/2),
+        # used for non-default RoPE scaling (e.g. llama3). When None the default
+        # `1 / base**(2i/d)` schedule is used.
+        self._inv_freq_override = (
+            inv_freq.to(torch.float32) if inv_freq is not None else None
+        )
+        self._attention_scaling = float(attention_scaling)
         self._use_hf_impl = os.environ.get("USE_HF_IMPL", "False").lower() == "true"
         self._compute_sin_and_cos()
 
@@ -91,10 +172,13 @@ class RoPECache(torch.nn.Module):
         base = self._base
 
         with torch.device("cpu"):
-            theta = 1.0 / (
-                base
-                ** (torch.arange(start=0, end=head_dim, step=2, dtype=torch.float32) / head_dim)
-            )
+            if self._inv_freq_override is not None:
+                theta = self._inv_freq_override.to(torch.float32)
+            else:
+                theta = 1.0 / (
+                    base
+                    ** (torch.arange(start=0, end=head_dim, step=2, dtype=torch.float32) / head_dim)
+                )
 
             if self._use_hf_impl:
                 theta = theta.to(dtype)
@@ -106,10 +190,12 @@ class RoPECache(torch.nn.Module):
             # Calculate product of position index and theta
             freqs = seq_idx[:, None] * theta
 
-            # Cache cos sin values
+            # Cache cos sin values (attention_scaling is 1.0 for default/llama3).
             emb = torch.concatenate((freqs, freqs), dim=-1)
-            self.cos_cached = torch.nn.Buffer(torch.cos(emb).to(dtype=dtype), persistent=False)
-            self.sin_cached = torch.nn.Buffer(torch.sin(emb).to(dtype=dtype), persistent=False)
+            cos = torch.cos(emb) * self._attention_scaling
+            sin = torch.sin(emb) * self._attention_scaling
+            self.cos_cached = torch.nn.Buffer(cos.to(dtype=dtype), persistent=False)
+            self.sin_cached = torch.nn.Buffer(sin.to(dtype=dtype), persistent=False)
 
     def gather_cos_sin(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather the cached cos/sin values using the position_ids"""
