@@ -85,7 +85,7 @@ public enum ConfigurationError: Error, LocalizedError {
 ///
 /// KV cache is preserved between `generate()` calls. Call `reset()` to clear.
 public protocol InferenceEngine: Sendable {
-    associatedtype OutputSequence: AsyncSequence<InferenceOutput, Error>
+    associatedtype OutputSequence: InferenceOutputSequence
     typealias TokenId = Int32
 
     // MARK: - Primary API
@@ -96,34 +96,38 @@ public protocol InferenceEngine: Sendable {
     ///   - input: Token IDs (prompt, context, or continuation).
     ///   - sampling: Sampling configuration (temperature, topK, etc.).
     ///   - generation: Inference options (maxTokens, includeLogits).
-    /// - Returns: Async sequence of `InferenceOutput`.
+    /// - Returns: An `InferenceOutputSequence` — iterate for tokens, read
+    ///   `stopReason` after the loop to learn why generation ended.
     func generate(
         with input: [TokenId],
         samplingConfiguration: SamplingConfiguration,
         inferenceOptions: InferenceOptions
-    ) throws -> OutputSequence
+    ) async throws -> OutputSequence
 
     // MARK: - Lifecycle
 
-    /// Reset internal state including KV cache.
-    func reset() async throws
+    /// Number of tokens the engine has processed in the current session.
+    /// Resets to 0 on full reset. Used by callers to compute shared prefix length.
+    var processedTokenCount: Int { get }
 
-    /// Rewind the KV cache toward `length` tokens for cross-call PREFIX REUSE, keeping the
-    /// leading cached tokens valid and dropping everything after — so the next
-    /// `generate(with:)` prefills only the un-cached suffix instead of the whole prompt.
-    /// (Attention is causal: positions ≥ the retained length are overwritten before being
-    /// read, so no clearing is needed.)
-    ///
-    /// Returns the ACTUAL retained prefix length (0…`length`), which may be less than
-    /// requested because the last generated token's KV can lag one step behind — the
-    /// caller must prefill from the returned offset, not from `length`. Returns a
-    /// negative value if the engine can't safely rewind (recurrent/SSM state can't be
-    /// reconstructed mid-sequence; non-KV engines have nothing to trim), in which case
-    /// the caller must `reset()` and re-feed the full prompt. Default: unsupported.
-    func trimKVCache(to length: Int) async -> Int
+    /// Reset KV cache to the state after processing `tokenIndex` tokens.
+    /// - tokenIndex == 0: full reset (clear all state, equivalent to reset())
+    /// - tokenIndex > 0: partial reset (keep cache for first tokenIndex positions)
+    /// Precondition: tokenIndex >= 0 && tokenIndex <= processedTokenCount
+    func reset(to tokenIndex: Int) async throws
 
     /// Run dummy inference to trigger kernel compilation.
     func warmup(queryLength: Int, sampling: SamplingConfiguration?) async throws
+
+    // MARK: - Cancellation
+
+    /// Whether the engine has an active generation in progress.
+    var isBusy: Bool { get }
+
+    /// Cancel any in-flight generation. Invalidates the current GenerationToken.
+    /// For pull-based engines, takes effect on the next `next()` call.
+    /// For push-based engines (pipelined), also cancels the background Task.
+    func cancel() async throws
 
     // MARK: - Capabilities
 
@@ -131,11 +135,12 @@ public protocol InferenceEngine: Sendable {
     /// GPU-pipelined engines (which sample on-device) return false.
     var supportsLogits: Bool { get }
 
-    /// Feed contract for prefix reuse after `trimKVCache`. `true`: `generate(with:)` takes
-    /// the FULL running sequence and prefills only `input[retained...]` (sequential engine
-    /// slices internally). `false`: the caller passes ONLY the un-cached suffix (pipelined
-    /// prefills the given tokens at the current offset). Default: `true`.
-    var prefixReuseFeedsFullSequence: Bool { get }
+    /// How many tokens were reused from cache on the last `generate()` call.
+    ///
+    /// After each `generate()`, this reflects how many leading tokens of the input
+    /// matched the engine's cached history and were skipped (no recomputation needed).
+    /// Useful for debugging multi-turn efficiency and verifying prefix caching behavior.
+    var lastPrefixHitCount: Int { get }
 
     // MARK: - Configuration
 
@@ -179,19 +184,37 @@ extension InferenceEngine {
     /// Default: supportsLogits is false. Engines that can return per-step
     /// logits (sequential, static-shape) override this to true.
     public var supportsLogits: Bool { false }
+}
 
-    /// Default: prefix reuse unsupported (recurrent/non-KV engines). Attention-only
-    /// KV engines override this to rewind `processedTokenCount`.
-    public func trimKVCache(to length: Int) async -> Int { -1 }
+extension InferenceEngine {
+    /// Default: no prefix hits (engine doesn't track history).
+    public var lastPrefixHitCount: Int { 0 }
+}
 
-    /// Default: reuse callers pass the full running sequence (engine slices internally).
-    public var prefixReuseFeedsFullSequence: Bool { true }
+extension InferenceEngine {
+    /// Default: engine is not busy.
+    public var isBusy: Bool { false }
+
+    /// Default: no-op cancel. Engines with active generation override this.
+    public func cancel() async throws {}
 }
 
 extension InferenceEngine {
     /// Default no-op implementation of warmup.
     public func warmup(queryLength: Int, sampling: SamplingConfiguration?) async throws {
         // No-op by default
+    }
+}
+
+extension InferenceEngine {
+    /// Default: processedTokenCount is 0 (engine hasn't processed anything).
+    public var processedTokenCount: Int { 0 }
+}
+
+extension InferenceEngine {
+    /// Default: reset() delegates to reset(to: 0) for full reset.
+    public func reset() async throws {
+        try await reset(to: 0)
     }
 }
 
@@ -262,6 +285,38 @@ public enum InferenceRuntimeError: Error, LocalizedError {
         }
     }
 }
+
+// MARK: - Engine Options
+
+// MARK: - Multimodal
+
+/// Engine that supports vision/audio input in addition to text tokens.
+///
+/// The typical flow:
+/// 1. `encodeImage(at:)` — preprocess + run vision encoder, return embeddings
+/// 2. `generate(with: EmbeddedInput, ...)` — scatter-merge embeddings into
+///    token sequence and run prefill + decode
+///
+/// The caller owns the embeddings and decides caching strategy.
+public protocol MultimodalInferenceEngine: InferenceEngine {
+    /// Encode an image into embeddings suitable for injection into the VLM.
+    /// Returns the embedded representation — caller decides whether to cache.
+    func encodeImage(at url: URL) async throws -> EmbeddedInput
+
+    /// Generate tokens from a token sequence with embedded image regions.
+    /// The engine scatter-merges `input.embeddingPositions` with the embedded data
+    /// during prefill, then continues standard autoregressive decode.
+    func generate(
+        with input: EmbeddedInput,
+        tokens: [TokenId],
+        samplingConfiguration: SamplingConfiguration,
+        inferenceOptions: InferenceOptions
+    ) async throws -> OutputSequence
+}
+
+// TODO: Multi-turn — caller can cache EmbeddedInput across turns and pass it
+// again with the accumulated token context. Engine keeps image in KV cache
+// via reset(to:) preserving the prefill portion.
 
 // MARK: - Engine Options
 

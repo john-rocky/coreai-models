@@ -69,10 +69,22 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
     private let valueCacheDescriptor: NDArrayDescriptor
 
     // Track processed tokens for incremental inference
-    private var processedTokenCount: Int = 0
+    public private(set) var processedTokenCount: Int = 0
 
-    // Track in-flight generation for drain (same pattern as pipelined engine)
-    private let generating = Mutex(false)
+    // Token history for implicit prefix caching
+    private var history = TokenHistory()
+    public private(set) var lastPrefixHitCount: Int = 0
+
+    // Track in-flight generation via token (replaces simple bool lock)
+    private let _activeToken = Mutex<GenerationToken?>(nil)
+
+    public var isBusy: Bool { _activeToken.withLock { $0 != nil } }
+
+    /// Clear the engine's active token if it matches the given token.
+    /// Called by the iterator when generation finishes or is cancelled.
+    func clearTokenIfActive(_ token: GenerationToken) {
+        _activeToken.withLock { if $0 === token { $0 = nil } }
+    }
 
     // MARK: - Init
 
@@ -169,8 +181,8 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
         self.valueCache = NDArray(descriptor: resolvedValueDesc)
 
         CLILogger.log(
-            "KV cache: dynamic=\(isDynamic), initial=\(initialCapacity), "
-                + "key=\(keyCacheDesc.shape) → \(resolvedKeyDesc.shape)")
+            "KV cache: dynamic=\(isDynamic), initial=\(initialCapacity), key=\(keyCacheDesc.shape) → \(resolvedKeyDesc.shape)"
+        )
 
         // Allocate initial logits (1 token — will be reallocated per batch)
         let initLogitsDesc = logitsDesc.resolvingDynamicDimensions([1, 1, config.vocabSize])
@@ -196,10 +208,8 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
         )
 
         CLILogger.log(
-            "CoreAI clean engine initialized — "
-                + "inputs: \(descriptor.inputNames), "
-                + "outputs: \(descriptor.outputNames), "
-                + "states: \(descriptor.stateNames)")
+            "CoreAI clean engine initialized — inputs: \(descriptor.inputNames), outputs: \(descriptor.outputNames), states: \(descriptor.stateNames)"
+        )
     }
 
     /// Convenience initializer with direct model URL.
@@ -316,8 +326,8 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
             let chunk = remainingTokens[remainingTokens.startIndex..<chunkEnd]
 
             CLILogger.log(
-                "Chunk \(chunkIndex + 1)/\(totalChunks): "
-                    + "\(chunk.count) tokens at position \(processedTokenCount)")
+                "Chunk \(chunkIndex + 1)/\(totalChunks): \(chunk.count) tokens at position \(processedTokenCount)"
+            )
 
             lastLogits = try await processTokenBatch(chunk)
             remainingTokens = remainingTokens[chunkEnd...]
@@ -338,72 +348,31 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
         with input: [TokenId],
         samplingConfiguration: SamplingConfiguration,
         inferenceOptions: InferenceOptions
-    ) throws -> some AsyncSequence<InferenceOutput, Error> {
-        AsyncThrowingStream { continuation in
-            Task {
-                self.generating.withLock { $0 = true }
-                defer { self.generating.withLock { $0 = false } }
-                do {
-                    let maxTokens: Int
-                    if let forced = inferenceOptions.forcedContinuation {
-                        maxTokens = forced.count
-                    } else {
-                        maxTokens = min(
-                            inferenceOptions.maxTokens ?? Int.max,
-                            max(0, self.config.maxContextLength - input.count)
-                        )
-                    }
-                    let returnsLogits = inferenceOptions.includeLogits
-                    var inputTokens = input
-
-                    for i in 0..<maxTokens {
-                        try Task.checkCancellation()
-
-                        guard self.processedTokenCount < inputTokens.count else {
-                            throw InferenceRuntimeError.invalidState("No new tokens to process")
-                        }
-
-                        let newTokens = inputTokens[self.processedTokenCount...]
-                        let strategy = self.selectPrefillStrategy(newTokenCount: newTokens.count)
-
-                        let logitBuffer: [LogitsScalarType]
-                        switch strategy {
-                        case .chunked(let chunkSize):
-                            logitBuffer = try await self.processChunkedPrompt(
-                                tokens: newTokens, chunkSize: chunkSize)
-                        case .wholeBatch:
-                            let allLogits = try await self.processTokenBatch(newTokens)
-                            logitBuffer = lastTokenLogits(
-                                from: allLogits, vocabSize: self.config.vocabSize)
-                        case .oneAtATime:
-                            var lastLogits: [LogitsScalarType] = []
-                            for j in newTokens.indices {
-                                lastLogits = try await self.processTokenBatch(newTokens[j...j])
-                            }
-                            logitBuffer = lastLogits
-                        }
-
-                        let nextToken: Int32
-                        if let forced = inferenceOptions.forcedContinuation {
-                            nextToken = forced[i]
-                        } else {
-                            var mutableLogits = logitBuffer
-                            nextToken = samplingConfiguration.fallbackSampler(from: &mutableLogits)
-                        }
-
-                        continuation.yield(
-                            InferenceOutput(
-                                tokenId: nextToken,
-                                logits: returnsLogits ? logitBuffer : nil
-                            ))
-                        inputTokens.append(nextToken)
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+    ) async throws -> GenerationSequence {
+        // Implicit prefix caching: resolve before creating Iterator.
+        // Implicit prefix caching: resolve input against history.
+        if history.count > 0 {
+            let (commonPrefix, _) = history.resolve(input: input)
+            if commonPrefix < input.count && commonPrefix < history.count {
+                // Divergence: input differs from history. Full reset needed.
+                internalReset(to: 0)
+            } else if processedTokenCount >= input.count {
+                // Pure extension: all input tokens match history. Rewind for seeding.
+                let resetTo = Swift.max(0, commonPrefix - 1)
+                internalReset(to: resetTo)
             }
+            lastPrefixHitCount = commonPrefix
         }
+
+        let token = GenerationToken()
+        _activeToken.withLock { $0 = token }
+        return GenerationSequence(
+            engine: self,
+            input: input,
+            samplingConfiguration: samplingConfiguration,
+            inferenceOptions: inferenceOptions,
+            generationToken: token
+        )
     }
 
     // MARK: - Lifecycle
@@ -411,7 +380,7 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
     /// Wait for any in-flight generate() Task to finish.
     private func drain() {
         var attempts = 0
-        while generating.withLock({ $0 }) {
+        while _activeToken.withLock({ $0 != nil }) {
             attempts += 1
             if attempts > 5000 {
                 fatalError("Sequential engine drain() timeout — generation Task stuck?")
@@ -420,26 +389,38 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
         }
     }
 
-    public func reset() {
-        drain()
-        let resetSpan = InstrumentsProfiler.beginReset(engine: "CoreAIClean")
-        processedTokenCount = 0
-        zeroFill(&keyCache)
-        zeroFill(&valueCache)
-        resetSpan.end()
+    public func cancel() async throws {
+        _activeToken.withLock {
+            $0?.cancel()
+            $0 = nil
+        }
     }
 
-    /// Rewind the cache offset for prefix reuse (see `InferenceEngine.trimKVCache`). This
-    /// engine's `generate(with:)` already prefills only `input[processedTokenCount...]`, so
-    /// after this the caller re-feeds the FULL running sequence and only the suffix is
-    /// processed. KV-only (no recurrent state) — always safe; no clearing needed since
-    /// causal attention never reads positions ≥ the retained offset before they're rewritten.
-    public func trimKVCache(to length: Int) async -> Int {
-        drain()
-        guard length >= 0 else { return -1 }
-        let retained = min(length, processedTokenCount)
-        processedTokenCount = retained
-        return retained
+    public func reset(to tokenIndex: Int) async throws {
+        precondition(
+            tokenIndex >= 0 && tokenIndex <= processedTokenCount,
+            "reset(to: \(tokenIndex)) out of range [0, \(processedTokenCount)]")
+        _activeToken.withLock {
+            $0?.cancel()
+            $0 = nil
+        }
+        internalReset(to: tokenIndex)
+    }
+
+    /// Internal reset without cancelling the active generation token.
+    /// Used by the Iterator when it detects a prefix mismatch mid-generation.
+    func internalReset(to tokenIndex: Int) {
+        let resetSpan = InstrumentsProfiler.beginReset(engine: "CoreAIClean")
+        if tokenIndex == 0 {
+            processedTokenCount = 0
+            history.clear()
+            zeroFill(&keyCache)
+            zeroFill(&valueCache)
+        } else {
+            processedTokenCount = tokenIndex
+            history.truncate(to: tokenIndex)
+        }
+        resetSpan.end()
     }
 
     public func cleanup() {
@@ -524,6 +505,175 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
             for i in 0..<count {
                 ptr[i] = 0
             }
+        }
+    }
+}
+
+extension CoreAISequentialEngine {
+    /// Async sequence of `InferenceOutput` produced by `generate()`.
+    public struct GenerationSequence: InferenceOutputSequence {
+        public typealias Element = InferenceOutput
+        public typealias Failure = Error
+
+        let engine: CoreAISequentialEngine
+        let input: [CoreAISequentialEngine.TokenId]
+        let samplingConfiguration: SamplingConfiguration
+        let inferenceOptions: InferenceOptions
+        let generationToken: GenerationToken
+
+        /// Shared with the iterator so the caller can read why generation ended.
+        let stopReasonStore = StopReasonStore()
+
+        public var stopReason: StopReason? { stopReasonStore.stopReason }
+
+        public func setStopReason(_ reason: StopReason) {
+            stopReasonStore.set(reason)
+        }
+
+        public func makeAsyncIterator() -> Iterator {
+            Iterator(
+                engine: engine,
+                input: input,
+                samplingConfiguration: samplingConfiguration,
+                inferenceOptions: inferenceOptions,
+                stopReasonStore: stopReasonStore,
+                generationToken: generationToken
+            )
+        }
+    }
+}
+
+extension CoreAISequentialEngine.GenerationSequence {
+    public final class Iterator: AsyncIteratorProtocol {
+        public typealias Element = InferenceOutput
+        public typealias Failure = Error
+
+        private let engine: CoreAISequentialEngine
+        private let samplingConfiguration: SamplingConfiguration
+        private let returnsLogits: Bool
+        private let forcedContinuation: [CoreAISequentialEngine.TokenId]?
+        private let maxTokens: Int
+        private let stopReasonStore: StopReasonStore
+        private let generationToken: GenerationToken
+
+        private var inputTokens: [CoreAISequentialEngine.TokenId]
+        private var step: Int = 0
+        private var finished: Bool = false
+
+        init(
+            engine: CoreAISequentialEngine,
+            input: [CoreAISequentialEngine.TokenId],
+            samplingConfiguration: SamplingConfiguration,
+            inferenceOptions: InferenceOptions,
+            stopReasonStore: StopReasonStore,
+            generationToken: GenerationToken
+        ) {
+            self.engine = engine
+            self.samplingConfiguration = samplingConfiguration
+            self.returnsLogits = inferenceOptions.includeLogits
+            self.forcedContinuation = inferenceOptions.forcedContinuation
+            self.stopReasonStore = stopReasonStore
+            self.generationToken = generationToken
+            self.inputTokens = input
+            if let forced = inferenceOptions.forcedContinuation {
+                self.maxTokens = forced.count
+            } else {
+                self.maxTokens = Swift.min(
+                    inferenceOptions.maxTokens ?? Int.max,
+                    Swift.max(0, engine.config.maxContextLength - input.count)
+                )
+            }
+        }
+
+        deinit {
+            engine.clearTokenIfActive(generationToken)
+        }
+
+        public func next() async throws -> InferenceOutput? {
+            if finished { return nil }
+
+            if generationToken.isCancelled {
+                stopReasonStore.set(.cancelled)
+                finishAndRelease()
+                return nil
+            }
+
+            guard step < maxTokens else {
+                // Natural exhaustion. Don't clobber a reason a decoder set (e.g. `.eos`).
+                stopReasonStore.setIfUnset(.maxTokens)
+                finishAndRelease()
+                return nil
+            }
+
+            do {
+                try Task.checkCancellation()
+
+                guard engine.processedTokenCount < inputTokens.count else {
+                    throw InferenceRuntimeError.invalidState("No new tokens to process")
+                }
+
+                let oldProcessedCount = engine.processedTokenCount
+                let newTokens = inputTokens[engine.processedTokenCount...]
+                let strategy = engine.selectPrefillStrategy(newTokenCount: newTokens.count)
+
+                let logitBuffer: [LogitsScalarType]
+                switch strategy {
+                case .chunked(let chunkSize):
+                    logitBuffer = try await engine.processChunkedPrompt(tokens: newTokens, chunkSize: chunkSize)
+                case .wholeBatch:
+                    let allLogits = try await engine.processTokenBatch(newTokens)
+                    logitBuffer = lastTokenLogits(from: allLogits, vocabSize: engine.config.vocabSize)
+                case .oneAtATime:
+                    var lastLogits: [LogitsScalarType] = []
+                    for j in newTokens.indices {
+                        lastLogits = try await engine.processTokenBatch(newTokens[j...j])
+                    }
+                    logitBuffer = lastLogits
+                }
+
+                // Update history with newly processed tokens
+                let processedSlice = inputTokens[oldProcessedCount..<engine.processedTokenCount]
+                engine.history.append(contentsOf: processedSlice)
+
+                // Check cancellation after inference step
+                if generationToken.isCancelled {
+                    stopReasonStore.set(.cancelled)
+                    finishAndRelease()
+                    return nil
+                }
+
+                let nextToken: Int32
+                if let forced = forcedContinuation {
+                    nextToken = forced[step]
+                } else {
+                    var mutableLogits = logitBuffer
+                    nextToken = samplingConfiguration.fallbackSampler(from: &mutableLogits)
+                }
+
+                inputTokens.append(nextToken)
+                step += 1
+
+                return InferenceOutput(
+                    tokenId: nextToken,
+                    logits: returnsLogits ? logitBuffer : nil
+                )
+            } catch is CancellationError {
+                stopReasonStore.set(.cancelled)
+                finishAndRelease()
+                throw CancellationError()
+            } catch {
+                stopReasonStore.set(.error)
+                finishAndRelease()
+                throw error
+            }
+        }
+
+        private func finishAndRelease() {
+            guard !finished else {
+                return
+            }
+            finished = true
+            engine.clearTokenIfActive(generationToken)
         }
     }
 }

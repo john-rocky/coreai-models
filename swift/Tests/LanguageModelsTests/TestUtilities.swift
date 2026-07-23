@@ -4,6 +4,7 @@
 // be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
 import Foundation
+import Synchronization
 import TestUtilities
 import Tokenizers
 
@@ -37,6 +38,23 @@ class MockEngine: InferenceEngine, @unchecked Sendable {
     /// Tracks whether reset() was called
     private(set) var resetCalled: Bool = false
 
+    /// Number of tokens the engine has processed in the current session.
+    var processedTokenCount: Int = 0
+
+    /// Token history for implicit prefix caching
+    var history = TokenHistory()
+    private(set) var lastPrefixHitCount: Int = 0
+
+    // Generation lifecycle
+    private let _activeToken = Mutex<GenerationToken?>(nil)
+
+    var isBusy: Bool { _activeToken.withLock { $0 != nil } }
+
+    /// Clear the engine's active token if it matches the given token.
+    func clearTokenIfActive(_ token: GenerationToken) {
+        _activeToken.withLock { if $0 === token { $0 = nil } }
+    }
+
     init(
         tokens: [Int32] = [10, 20, 30, 40, 50],
         maxContextLength: Int = 4096,
@@ -53,52 +71,174 @@ class MockEngine: InferenceEngine, @unchecked Sendable {
         with input: [TokenId],
         samplingConfiguration: SamplingConfiguration,
         inferenceOptions: InferenceOptions
-    ) throws -> AsyncThrowingStream<InferenceOutput, Error> {
-        AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    let forced = inferenceOptions.forcedContinuation
-                    let maxTokens =
-                        forced?.count
-                        ?? min(
-                            inferenceOptions.maxTokens ?? Int.max,
-                            max(0, self.config.maxContextLength - input.count)
-                        )
-                    let returnsLogits = inferenceOptions.includeLogits
+    ) async throws -> GenerationSequence {
+        let token = GenerationToken()
+        _activeToken.withLock { $0 = token }
 
-                    for i in 0..<maxTokens {
-                        try Task.checkCancellation()
-                        let idx = self.inferenceCallCount % self.tokenSequence.count
-                        let sequenceToken = self.tokenSequence[idx]
-                        self.inferenceCallCount += 1
+        // Implicit prefix caching: resolve input against history
+        let (commonPrefix, resolvedNewTokens) = history.resolve(input: input)
+        lastPrefixHitCount = commonPrefix
 
-                        let nextToken = forced?[i] ?? sequenceToken
+        if commonPrefix < processedTokenCount {
+            // Input diverged — rewind
+            processedTokenCount = commonPrefix
+            history.truncate(to: commonPrefix)
+        }
 
-                        let logits: [Float16]?
-                        if returnsLogits, let vocabSize = self.vocabSize {
-                            var dist = [Float16](repeating: Float16(-10.0), count: vocabSize)
-                            let tokenIdx = Int(nextToken)
-                            if tokenIdx >= 0 && tokenIdx < vocabSize {
-                                dist[tokenIdx] = Float16(10.0)
-                            }
-                            logits = dist
-                        } else {
-                            logits = nil
-                        }
+        // Simulate prefill: count new tokens beyond what's already cached.
+        let newInputTokens = Array(resolvedNewTokens)
+        processedTokenCount += newInputTokens.count
+        history.append(contentsOf: newInputTokens[...])
 
-                        continuation.yield(InferenceOutput(tokenId: nextToken, logits: logits))
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+        return GenerationSequence(
+            engine: self,
+            input: input,
+            inferenceOptions: inferenceOptions,
+            generationToken: token
+        )
+    }
+
+    struct GenerationSequence: InferenceOutputSequence {
+        typealias Element = InferenceOutput
+        typealias Failure = Error
+
+        let engine: MockEngine
+        let input: [TokenId]
+        let inferenceOptions: InferenceOptions
+        let generationToken: GenerationToken
+
+        let stopReasonStore = StopReasonStore()
+
+        var stopReason: StopReason? { stopReasonStore.stopReason }
+
+        func setStopReason(_ reason: StopReason) {
+            stopReasonStore.set(reason)
+        }
+
+        func makeAsyncIterator() -> Iterator {
+            Iterator(
+                engine: engine,
+                input: input,
+                inferenceOptions: inferenceOptions,
+                stopReasonStore: stopReasonStore,
+                generationToken: generationToken
+            )
+        }
+
+        struct Iterator: AsyncIteratorProtocol {
+            typealias Element = InferenceOutput
+            typealias Failure = Error
+
+            let engine: MockEngine
+            let returnsLogits: Bool
+            let forcedContinuation: [TokenId]?
+            let maxTokens: Int
+            let stopReasonStore: StopReasonStore
+            let generationToken: GenerationToken
+
+            var step: Int = 0
+            var finished: Bool = false
+
+            init(
+                engine: MockEngine,
+                input: [TokenId],
+                inferenceOptions: InferenceOptions,
+                stopReasonStore: StopReasonStore,
+                generationToken: GenerationToken
+            ) {
+                self.engine = engine
+                self.returnsLogits = inferenceOptions.includeLogits
+                self.forcedContinuation = inferenceOptions.forcedContinuation
+                self.stopReasonStore = stopReasonStore
+                self.generationToken = generationToken
+                if let forced = inferenceOptions.forcedContinuation {
+                    self.maxTokens = forced.count
+                } else {
+                    self.maxTokens = Swift.min(
+                        inferenceOptions.maxTokens ?? Int.max,
+                        Swift.max(0, engine.config.maxContextLength - input.count)
+                    )
                 }
+            }
+
+            mutating func next() async throws -> InferenceOutput? {
+                if finished { return nil }
+
+                if generationToken.isCancelled {
+                    stopReasonStore.set(.cancelled)
+                    finishAndRelease()
+                    return nil
+                }
+
+                guard step < maxTokens else {
+                    stopReasonStore.setIfUnset(.maxTokens)
+                    finishAndRelease()
+                    return nil
+                }
+
+                do {
+                    try Task.checkCancellation()
+
+                    let idx = engine.inferenceCallCount % engine.tokenSequence.count
+                    let sequenceToken = engine.tokenSequence[idx]
+                    engine.inferenceCallCount += 1
+                    engine.processedTokenCount += 1
+
+                    let nextToken = forcedContinuation?[step] ?? sequenceToken
+
+                    // Track generated token in history
+                    engine.history.append(nextToken)
+
+                    let logits: [Float16]?
+                    if returnsLogits, let vocabSize = engine.vocabSize {
+                        var dist = [Float16](repeating: Float16(-10.0), count: vocabSize)
+                        let tokenIdx = Int(nextToken)
+                        if tokenIdx >= 0 && tokenIdx < vocabSize {
+                            dist[tokenIdx] = Float16(10.0)
+                        }
+                        logits = dist
+                    } else {
+                        logits = nil
+                    }
+
+                    step += 1
+                    return InferenceOutput(tokenId: nextToken, logits: logits)
+                } catch is CancellationError {
+                    stopReasonStore.set(.cancelled)
+                    finishAndRelease()
+                    throw CancellationError()
+                } catch {
+                    stopReasonStore.set(.error)
+                    finishAndRelease()
+                    throw error
+                }
+            }
+
+            private mutating func finishAndRelease() {
+                guard !finished else { return }
+                finished = true
+                engine.clearTokenIfActive(generationToken)
             }
         }
     }
 
-    func reset() async throws {
+    func cancel() async throws {
+        _activeToken.withLock {
+            $0?.cancel()
+            $0 = nil
+        }
+    }
+
+    func reset(to tokenIndex: Int) async throws {
+        try await cancel()
         resetCalled = true
-        inferenceCallCount = 0
+        processedTokenCount = tokenIndex
+        if tokenIndex == 0 {
+            inferenceCallCount = 0
+            history.clear()
+        } else {
+            history.truncate(to: tokenIndex)
+        }
     }
 
     func cleanup() async throws {}

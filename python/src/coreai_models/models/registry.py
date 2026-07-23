@@ -60,6 +60,9 @@ def _get_registry() -> dict[str, ModelEntry]:
     from coreai_models.models.macos.qwen3 import Qwen3ForCausalLM
     from coreai_models.models.macos.qwen3_5 import Qwen3_5StatefulForCausalLM
     from coreai_models.models.macos.qwen3_moe import Qwen3MoeForCausalLM
+    from coreai_models.models.macos.qwen3_vl import (
+        Qwen3VLForCausalLM,
+    )
     from coreai_models.models.macos.smollm3 import SmolLM3ForCausalLM
 
     return {
@@ -121,6 +124,14 @@ def _get_registry() -> dict[str, ModelEntry]:
         # Text weights nest under "model.language_model." in the multimodal ckpt.
         "qwen3_5_text": ModelEntry(
             macos_class=Qwen3_5StatefulForCausalLM,
+            hf_config_attr="text_config",
+            hf_state_dict_prefix="model.language_model.",
+        ),
+        # Qwen3-VL: vision-language model.
+        # macos_class = standard text decoder (input_ids, for text-only use).
+        # Qwen3VLForCausalLMEmbeddings is used by the VLM export script (takes inputs_embeds).
+        "qwen3_vl": ModelEntry(
+            macos_class=Qwen3VLForCausalLM,
             hf_config_attr="text_config",
             hf_state_dict_prefix="model.language_model.",
         ),
