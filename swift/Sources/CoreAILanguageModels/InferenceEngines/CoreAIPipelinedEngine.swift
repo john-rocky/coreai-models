@@ -1293,6 +1293,17 @@ private struct EngineImpl: ~Copyable {
                 continuation.yield(nextToken)
             }
 
+            // Order the sampler behind this step's logits write. The model's encode work
+            // is committed to the SHARED Metal queue from the stream's internal task
+            // machinery, asynchronously — a command buffer committed directly from here
+            // can jump ahead of a still-open stream batch and read a not-yet-written
+            // logits row (observed: bogus sampled token from a zeroed row at every
+            // post-drain boundary). The stream's only public ordering primitive is this
+            // full drain; it costs ~30% pipelined decode throughput. (Tried: silgen-
+            // shimming the internal appendTask to commit the sampler from the stream's
+            // task queue — its execution model reorders against subsequent encodes and
+            // scrambles decode entirely. A real fix needs an upstream/SDK ordering API.)
+            await computeStream.currentWorkCompleted()
             if queryLength == 1 {
                 localGPUSampler.encode(
                     to: queue,
