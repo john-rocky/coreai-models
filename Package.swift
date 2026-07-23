@@ -51,7 +51,10 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.2.0"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.0"),
-        .package(url: "https://github.com/mlc-ai/xgrammar", branch: "main"),
+        // exact 0.2.2 == the revision main was pinned at (4d145cc) — pinned as a stable
+        // version so this package itself can be consumed by version tag (SPM forbids
+        // stable->branch dependency edges).
+        .package(url: "https://github.com/mlc-ai/xgrammar", exact: "0.2.2"),
     ],
     targets: [
         .target(
