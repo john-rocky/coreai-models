@@ -1403,7 +1403,31 @@ private struct EngineImpl: ~Copyable {
             throw InferenceRuntimeError.contextLengthExceeded(
                 processedTokenCount, config.maxContextLength)
         }
-        let totalMaxTokens = min(maxTokens ?? Int.max, contextLeftAfterPrompt)
+        var totalMaxTokens = min(maxTokens ?? Int.max, contextLeftAfterPrompt)
+
+        // iOS + dynamically-sized KV cache: the on-device compiler miscompiles this
+        // graph class once the bound KV state's seq dim reaches 2048 — output is
+        // corrupt from the first token (capacity <=1024 is correct; macOS is correct
+        // at every size; a cache evict does not help). Cap the pre-grow target at
+        // 1024 until the compiler fix lands, and fail loudly when even that budget
+        // is exhausted. Repro + bisect: apple/coreai-models#124.
+        #if os(iOS)
+        if kvCache is GrowingKVCache {
+            let iosDynamicKVCapacityCap = 1024
+            let budgetLeft = iosDynamicKVCapacityCap - processedTokenCount - prompt.count
+            guard budgetLeft >= 1 else {
+                throw InferenceRuntimeError.contextLengthExceeded(
+                    processedTokenCount, iosDynamicKVCapacityCap)
+            }
+            if totalMaxTokens > budgetLeft {
+                CLILogger.log(
+                    "iOS dynamic-KV guard: capping maxTokens \(totalMaxTokens) -> \(budgetLeft) "
+                        + "(KV capacity limited to \(iosDynamicKVCapacityCap); apple/coreai-models#124)"
+                )
+                totalMaxTokens = budgetLeft
+            }
+        }
+        #endif
 
         // Pre-grow KV cache for prompt
         let promptCapacityNeeded = min(
