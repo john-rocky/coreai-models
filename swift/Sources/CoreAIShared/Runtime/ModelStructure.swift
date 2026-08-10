@@ -9,10 +9,14 @@ import Foundation
 // MARK: - Model Structure Detection
 
 /// Well-known graph function names used for structure detection.
-private enum GraphNames {
-    static let main = "main"
-    static let loadEmbeddings = "load_embeddings"
-    static let extendPrefix = "extend"
+public enum GraphNames {
+    public static let main = "main"
+    public static let loadEmbeddings = "load_embeddings"
+    public static let extendPrefix = "extend"
+    // Multi-function segmenter (lite SAM3 export for iOS).
+    public static let imageEncode = "image_encode"
+    public static let textEncode = "text_encode"
+    public static let detect = "detect"
 }
 
 /// Represents the detected structure of a Core AI model.
@@ -20,6 +24,8 @@ private enum GraphNames {
 /// Model structure determines which inference engine variant should be used:
 /// - `chunkedStatic`: Uses static-shape `StaticShapeEngine`
 /// - `dynamic`: Uses `CoreAISequentialEngine` or `CoreAIPipelinedEngine`
+/// - `multiFunctionSegmenter`: Uses `CoreAISegmentationEngine` against an asset
+///   with `image_encode` / `text_encode` / `detect` graphs (e.g. optimized SAM3).
 public enum ModelStructure: Equatable, Sendable, CustomStringConvertible {
     /// Chunked static model with fixed batch size for static-shape execution.
     /// Identified by presence of `extend_*` and `load_embeddings` functions.
@@ -28,12 +34,18 @@ public enum ModelStructure: Equatable, Sendable, CustomStringConvertible {
     /// Dynamic model with single `main` function for GPU/CPU inference.
     case dynamic
 
+    /// Three-function segmenter targeting iOS.
+    /// Identified by presence of `image_encode`, `text_encode`, and `detect` graphs.
+    case multiFunctionSegmenter
+
     public var description: String {
         switch self {
         case .chunkedStatic(let batchSize):
             return "chunkedStatic(batchSize: \(batchSize))"
         case .dynamic:
             return "dynamic"
+        case .multiFunctionSegmenter:
+            return "multiFunctionSegmenter"
         }
     }
 
@@ -41,9 +53,10 @@ public enum ModelStructure: Equatable, Sendable, CustomStringConvertible {
     ///
     /// - `chunkedStatic` → NeuralEngine
     /// - `dynamic` → GPU
+    /// - `multiFunctionSegmenter` → NeuralEngine
     public var preferredDevice: String {
         switch self {
-        case .chunkedStatic:
+        case .chunkedStatic, .multiFunctionSegmenter:
             return "NeuralEngine"
         case .dynamic:
             return "GPU"
@@ -54,9 +67,10 @@ public enum ModelStructure: Equatable, Sendable, CustomStringConvertible {
     ///
     /// - `chunkedStatic` → prefer `.neuralEngine`
     /// - `dynamic` → prefer `.gpu` + `expectFrequentReshapes`
+    /// - `multiFunctionSegmenter` → prefer `.neuralEngine`
     public var specializationOptions: SpecializationOptions {
         switch self {
-        case .chunkedStatic:
+        case .chunkedStatic, .multiFunctionSegmenter:
             return SpecializationOptions(preferredComputeUnitKind: .neuralEngine)
         case .dynamic:
             var opts = SpecializationOptions(preferredComputeUnitKind: .gpu)
@@ -90,31 +104,81 @@ public struct PreparedModel: Sendable {
     /// Detected model structure (chunked/static vs dynamic).
     public let structure: ModelStructure
 
-    // MARK: - Core AI Model URL Resolution
+    // MARK: - Cache Inspection
 
-    /// If `url` is already `.aimodel`, returns it unchanged. Otherwise looks for
-    /// a sibling `.aimodel` directory with the same base name.
-    public static func resolveCoreAIModelURL(from url: URL) -> URL {
-        let ext = url.pathExtension
+    /// File extensions that identify a Core AI model asset (source or compiled).
+    private static let assetExtensions: Set<String> = ["aimodel", "aimodelc"]
 
-        // Already a Core AI format
-        if ext == "aimodel" {
-            return url
+    /// Enumerates the Core AI model asset(s) reachable from `url`.
+    ///
+    /// A model directory (e.g. an LLM bundle) contains one or more asset components alongside
+    /// other files (tokenizer, metadata); we can't assume specific component filenames, so scan
+    /// the directory for every `.aimodel`/`.aimodelc` entry. If `url` is itself an asset, it is
+    /// returned as the sole component. This filename-agnostic approach stays correct as new model
+    /// families add differently-named components.
+    ///
+    /// - Parameter url: Either a bundle directory containing asset components, or a single asset.
+    /// - Returns: The asset URLs to operate on, sorted for stable output. Empty only if `url` is a
+    ///   directory with no asset components.
+    public static func modelAssetURLs(at url: URL) throws -> [URL] {
+        // A path ending in a known asset extension IS the asset (asset bundles are themselves
+        // directories, so this must be checked before treating `url` as a container to scan).
+        if assetExtensions.contains(url.pathExtension) {
+            return [url]
         }
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: nil
+        )
+        return
+            entries
+            .filter { assetExtensions.contains($0.pathExtension) }
+            .sorted { $0.path < $1.path }
+    }
 
-        // Check for sibling Core AI model directory
-        let parentDir = url.deletingLastPathComponent()
-        let baseName = url.deletingPathExtension().lastPathComponent
-
-        let candidate = parentDir.appendingPathComponent("\(baseName).aimodel")
-        if FileManager.default.fileExists(atPath: candidate.path) {
-            CLILogger.log(
-                "  - Resolved CoreAI model path: \(url.lastPathComponent) → \(candidate.lastPathComponent)")
-            return candidate
+    /// Clears the Core AI specialization cache for every model asset reachable from `url`,
+    /// forcing re-specialization on the next load.
+    ///
+    /// Discovers components via ``modelAssetURLs(at:)`` — pass either a bundle directory or a
+    /// single asset. Used by CLI tools implementing `--clear-coreai-cache`.
+    ///
+    /// - Parameter url: A bundle directory containing asset components, or a single asset.
+    /// - Returns: The asset URLs whose cache entries were cleared.
+    @discardableResult
+    public static func clearCache(at url: URL) throws -> [URL] {
+        let assetURLs = try modelAssetURLs(at: url)
+        for assetURL in assetURLs {
+            try AIModelCache.default.deleteEntries(for: assetURL)
         }
+        return assetURLs
+    }
 
-        // Fall through to original URL (AIModel may still handle it)
-        return url
+    /// Reports whether the default Core AI cache already holds a specialized asset for `url`
+    /// under the given `options`.
+    ///
+    /// This only inspects the cache via `AIModelCache.model(for:options:)`; it never triggers
+    /// specialization. Returns `false` if no entry exists, or if an entry exists but fails to load.
+    ///
+    /// - Important: `options` must match the options the loader will use for `url`, otherwise a
+    ///   real cached specialization won't be found. Callers that load via `prepare(at:)` should use
+    ///   the ``isCached(at:)`` overload; callers that load via `AIModel(contentsOf:)` or a custom
+    ///   `SpecializationOptions` must pass the same value here.
+    public static func isCached(at url: URL, options: SpecializationOptions) -> Bool {
+        do {
+            return try AIModelCache.default.model(for: url, options: options) != nil
+        } catch {
+            return false
+        }
+    }
+
+    /// Reports whether the default Core AI cache already holds a specialized asset for `url`,
+    /// using the same structure-derived `SpecializationOptions` that ``prepare(at:)`` uses.
+    ///
+    /// Use this only for models loaded through ``prepare(at:)``. For other loaders, use
+    /// ``isCached(at:options:)`` with the matching options.
+    public static func isCached(at url: URL) -> Bool {
+        let options = probeStructure(at: url).specializationOptions
+        return isCached(at: url, options: options)
     }
 
     // MARK: - Asset Preparation
@@ -125,7 +189,7 @@ public struct PreparedModel: Sendable {
     /// dynamic models prefer GPU with frequent reshapes; chunked-static models prefer Neural Engine.
     ///
     /// - Parameters:
-    ///   - url: URL to the model asset (`.aimodel` bundle)
+    ///   - url: URL to the model asset (`.aimodel` or `.aimodelc` bundle)
     /// - Returns: Prepared asset with compiled library and detected structure
     /// - Throws: Error from `AIModel` if loading or specialization fails
     public static func prepare(
@@ -193,6 +257,16 @@ public struct PreparedModel: Sendable {
         if !extendFunctions.isEmpty && graphSet.contains(GraphNames.loadEmbeddings) {
             let batchSize = extractBatchSize(from: extendFunctions.first!) ?? 1
             return .chunkedStatic(batchSize: batchSize)
+        }
+
+        // Multi-function segmenter (e.g. optimized SAM3 — image_encode / text_encode / detect).
+        // Targets neuralEngine; checked before the `main` fallback because some asset variants ship
+        // a thin `main` graph alongside the trio.
+        if graphSet.contains(GraphNames.imageEncode)
+            && graphSet.contains(GraphNames.textEncode)
+            && graphSet.contains(GraphNames.detect)
+        {
+            return .multiFunctionSegmenter
         }
 
         // GPU model (dynamic)

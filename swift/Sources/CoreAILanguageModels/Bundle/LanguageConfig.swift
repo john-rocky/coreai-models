@@ -25,13 +25,18 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
     /// Vision-specific configuration. Nil for text-only language models.
     public let vision: VisionConfig?
 
+    /// Explicit state classification. Nil = use shape-based heuristic.
+    /// Keys are state names from the model descriptor, values are StateKind.
+    public let states: [String: StateKind]?
+
     public init(
         tokenizer: String,
         vocabSize: Int,
         maxContextLength: Int,
         embeddedTokenizer: Bool = true,
         functionMap: FunctionMap? = nil,
-        vision: VisionConfig? = nil
+        vision: VisionConfig? = nil,
+        states: [String: StateKind]? = nil
     ) {
         self.tokenizer = tokenizer
         self.vocabSize = vocabSize
@@ -39,6 +44,7 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
         self.embeddedTokenizer = embeddedTokenizer
         self.functionMap = functionMap
         self.vision = vision
+        self.states = states
     }
 
     enum CodingKeys: String, CodingKey {
@@ -48,6 +54,7 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
         case embeddedTokenizer = "embedded_tokenizer"
         case functionMap = "function_map"
         case vision
+        case states
     }
 
     public init(from decoder: Swift.Decoder) throws {
@@ -58,6 +65,7 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
         self.embeddedTokenizer = try c.decodeIfPresent(Bool.self, forKey: .embeddedTokenizer) ?? true
         self.functionMap = try c.decodeIfPresent(FunctionMap.self, forKey: .functionMap)
         self.vision = try c.decodeIfPresent(VisionConfig.self, forKey: .vision)
+        self.states = try c.decodeIfPresent([String: StateKind].self, forKey: .states)
     }
 
     // MARK: - Additional Stop Tokens
@@ -126,7 +134,7 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
         // 3. Check added_tokens_decoder for turn-ending special tokens
         //    (e.g. Gemma's <end_of_turn> ID 106, Qwen's <|im_end|>)
         //    Only include tokens whose content matches known turn-ending patterns.
-        let turnEndPatterns = ["end_of_turn", "im_end", "eot_id"]
+        let turnEndPatterns = ["end_of_turn", "im_end", "eot_id", "endoftext", "eot_token"]
         if let addedTokens = json["added_tokens_decoder"] as? [String: Any] {
             for (idString, value) in addedTokens {
                 guard let dict = value as? [String: Any],
@@ -137,6 +145,18 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
                 let lower = content.lowercased()
                 if id != mainEos && turnEndPatterns.contains(where: { lower.contains($0) }) {
                     result.insert(id)
+                }
+            }
+        }
+
+        // 4. Check for turn-ending tokens in in top level of config
+        for turnEndPattern in turnEndPatterns {
+            if let eotToken = json[turnEndPattern] as? String {
+                if let id = tokenizer.convertTokenToId(eotToken) {
+                    let id32 = Int32(id)
+                    if id32 != mainEos {
+                        result.insert(id32)
+                    }
                 }
             }
         }
@@ -169,6 +189,12 @@ public struct VisionConfig: Codable, Sendable, Equatable {
     /// Pixel rescale factor applied before normalization. Defaults to 1.0 when omitted.
     public let rescaleFactor: Double
 
+    /// Image preprocessing strategy. Defaults to stretch when omitted.
+    public let imageStrategy: ImageStrategy
+
+    /// Whether to include original image dimensions in the text prompt. Defaults to false.
+    public let includeImageInfo: Bool
+
     /// CLIP normalization (Qwen VL, Pixtral, InternVL, Phi-3.5-vision).
     public static let clipMean = [0.48145466, 0.4578275, 0.40821073]
     public static let clipStd = [0.26862954, 0.26130258, 0.27577711]
@@ -180,7 +206,9 @@ public struct VisionConfig: Codable, Sendable, Equatable {
         imageTokenId: Int32,
         imageMean: [Double]? = nil,
         imageStd: [Double]? = nil,
-        rescaleFactor: Double? = nil
+        rescaleFactor: Double? = nil,
+        imageStrategy: ImageStrategy? = nil,
+        includeImageInfo: Bool? = nil
     ) {
         self.imageSize = imageSize
         self.patchSize = patchSize
@@ -189,6 +217,8 @@ public struct VisionConfig: Codable, Sendable, Equatable {
         self.imageMean = imageMean ?? Self.clipMean
         self.imageStd = imageStd ?? Self.clipStd
         self.rescaleFactor = rescaleFactor ?? 1.0
+        self.imageStrategy = imageStrategy ?? .stretch
+        self.includeImageInfo = includeImageInfo ?? false
     }
 
     enum CodingKeys: String, CodingKey {
@@ -199,6 +229,8 @@ public struct VisionConfig: Codable, Sendable, Equatable {
         case imageMean = "image_mean"
         case imageStd = "image_std"
         case rescaleFactor = "rescale_factor"
+        case imageStrategy = "image_strategy"
+        case includeImageInfo = "include_image_info"
     }
 
     public init(from decoder: Swift.Decoder) throws {
@@ -210,5 +242,7 @@ public struct VisionConfig: Codable, Sendable, Equatable {
         self.imageMean = try c.decodeIfPresent([Double].self, forKey: .imageMean) ?? Self.clipMean
         self.imageStd = try c.decodeIfPresent([Double].self, forKey: .imageStd) ?? Self.clipStd
         self.rescaleFactor = try c.decodeIfPresent(Double.self, forKey: .rescaleFactor) ?? 1.0
+        self.imageStrategy = try c.decodeIfPresent(ImageStrategy.self, forKey: .imageStrategy) ?? .stretch
+        self.includeImageInfo = try c.decodeIfPresent(Bool.self, forKey: .includeImageInfo) ?? false
     }
 }

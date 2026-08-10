@@ -5,6 +5,7 @@
 
 import Accelerate
 import CoreAI
+import CoreAIShared
 import CoreGraphics
 import Foundation
 
@@ -160,7 +161,7 @@ public struct StableDiffusionPipeline: DiffusionPipeline {
 
         // Wrap latents back to NDArray for GenerationResult
         var latentsND = NDArray(shape: latentShape, scalarType: .float32)
-        var latentsView = latentsND.mutableView(as: Float.self)
+        let latentsView = latentsND.mutableView(as: Float.self)
         latentsView.withUnsafeMutablePointer { ptr, _, _ in
             for i in 0..<latents.count { ptr[i] = latents[i] }
         }
@@ -171,9 +172,10 @@ public struct StableDiffusionPipeline: DiffusionPipeline {
     // MARK: - Private Helpers
 
     private func encodeText(_ text: String) async throws -> [Float] {
-        let tokenize = components.textEncoder.tokenize
-        let ids = tokenize(text)
-        return try await components.textEncoder.function.run(intInputs: [(ids, [1, ids.count])])
+        let output = try await components.textEncoder.encode(text)
+        let shape = output.hiddenStates.shape
+        let count = shape.reduce(1, *)
+        return readNDArray(output.hiddenStates, as: Float.self, count: count)
     }
 
     private func runDenoiser(

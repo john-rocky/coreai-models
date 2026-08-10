@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from typing_extensions import Self
 
-from coreai_models.primitives._ops import mutable_slice_update
+from coreai_models.primitives._ops import mutable_cache_update_and_fetch
 
 
 class KVCacheHandler:
@@ -95,15 +95,23 @@ class KVCacheHandler:
     def gen_slice_args(
         self, layer_idx: int, offset: torch.IntTensor, num_token_updates: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        layer_index = self._layer_indices[layer_idx]
-        layer_index_end = self._layer_indices_end[layer_idx]
-        begin = torch.cat([layer_index, self._zero, self._zero, self._zero, offset])
+        layer_index = self._layer_indices[layer_idx].to(offset.device)
+        layer_index_end = self._layer_indices_end[layer_idx].to(offset.device)
+        begin = torch.cat(
+            [
+                layer_index,
+                self._zero.to(offset.device),
+                self._zero.to(offset.device),
+                self._zero.to(offset.device),
+                offset,
+            ]
+        )
         end = torch.cat(
             [
                 layer_index_end,
-                self._one,
-                self._hidden_size,
-                self._one,
+                self._one.to(offset.device),
+                self._hidden_size.to(offset.device),
+                self._one.to(offset.device),
                 offset + num_token_updates,
             ]
         )
@@ -147,23 +155,29 @@ class KVCacheHandler:
 
         begin, end = self.gen_slice_args(layer_idx, offset, num_token_updates)
 
-        # update k - note that iOS updates on dimension 4 (the last dimension)
-        mutable_slice_update(
+        # update k and fetch the full layer row in a single fused op.
+        k_out = mutable_cache_update_and_fetch(
             x=self._k_cache,
-            update=k.unsqueeze(0),
+            update=k,
             begin=begin,
             end=end,
+            layer_idx=layer_idx,
+            seq_dim=-1,
+            seq_len=None,
         )
 
-        # update v - note that iOS updates on dimension 4 (the last dimension)
-        mutable_slice_update(
+        # update v and fetch the full layer row in a single fused op
+        v_out = mutable_cache_update_and_fetch(
             x=self._v_cache,
-            update=v.unsqueeze(0),
+            update=v,
             begin=begin,
             end=end,
+            layer_idx=layer_idx,
+            seq_dim=-1,
+            seq_len=None,
         )
 
-        return self._k_cache[layer_idx], self._v_cache[layer_idx]
+        return k_out, v_out
 
     @property
     def k_cache(self) -> torch.Tensor:

@@ -68,6 +68,7 @@ let package = Package(
             swiftSettings: [
                 .define("CXGRAMMAR_IMPORT"),
                 .enableUpcomingFeature("MemberImportVisibility"),
+                .enableExperimentalFeature("Lifetimes"),
             ],
             linkerSettings: [
                 .linkedLibrary("c++")
@@ -142,6 +143,7 @@ let package = Package(
             name: "llm-runner",
             dependencies: [
                 "CoreAILanguageModels",
+                "CoreAIShared",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "swift/Sources/Tools/llm-runner",
@@ -165,6 +167,7 @@ let package = Package(
             name: "object-detector",
             dependencies: [
                 "CoreAIObjectDetector",
+                "CoreAIShared",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "swift/Sources/Tools/object-detector",
@@ -176,6 +179,7 @@ let package = Package(
             name: "diffusion-runner",
             dependencies: [
                 "CoreAIDiffusionPipeline",
+                "CoreAIShared",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "swift/Sources/Tools/diffusion-runner",
@@ -196,12 +200,13 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "speech-runner",
+            name: "speech-recognizer",
             dependencies: [
                 "CoreAISpeech",
+                "CoreAIShared",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
-            path: "swift/Sources/Tools/speech-runner",
+            path: "swift/Sources/Tools/speech-recognizer",
             swiftSettings: [
                 .enableUpcomingFeature("MemberImportVisibility")
             ]
@@ -236,6 +241,7 @@ let package = Package(
             name: "LanguageModelsTests",
             dependencies: [
                 "CoreAILanguageModels",
+                "CoreAIShared",
                 "TestUtilities",
                 .product(name: "Transformers", package: "swift-transformers"),
             ],
@@ -243,6 +249,9 @@ let package = Package(
             resources: [
                 .copy("Resources/MinimalTokenizer"),
                 .copy("Resources/diffusion_sampler_fixture.json"),
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("Lifetimes"),
             ],
             linkerSettings: [
                 .linkedLibrary("c++")
@@ -284,6 +293,14 @@ let package = Package(
             linkerSettings: [
                 .linkedLibrary("c++")
             ]
+        ),
+        .testTarget(
+            name: "SpeechTests",
+            dependencies: [
+                "CoreAISpeech",
+                "TestUtilities",
+            ],
+            path: "swift/Tests/SpeechTests"
         ),
     ],
     swiftLanguageModes: [.v6],

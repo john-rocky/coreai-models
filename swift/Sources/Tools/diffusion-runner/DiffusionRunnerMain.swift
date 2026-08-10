@@ -6,6 +6,7 @@
 import ArgumentParser
 import CoreAI
 import CoreAIDiffusionPipeline
+import CoreAIShared
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -79,16 +80,27 @@ struct DiffusionRunner: AsyncParsableCommand {
         help: "Path to pipeline trace dir — use Python's noise + embeddings instead of generating")
     var traceInputsDir: String?
 
+    @Flag(
+        name: .customLong("clear-coreai-cache"),
+        help: "Clear Core AI cached specialization for this model before loading (forces re-specialization)"
+    )
+    var clearCoreAICache: Bool = false
+
     func run() async throws {
-        let modelURL = URL(fileURLWithPath: model)
+        let bundleURL = URL(fileURLWithPath: model)
+
+        if clearCoreAICache {
+            let cleared = try PreparedModel.clearCache(at: bundleURL)
+            print("🗑️  Cleared specialization cache for \(bundleURL.lastPathComponent) (\(cleared.count) component(s))")
+        }
 
         if let parityDir = parityTestDir {
-            try await runParityTest(modelURL: modelURL, dataDir: URL(fileURLWithPath: parityDir))
+            try await runParityTest(modelURL: bundleURL, dataDir: URL(fileURLWithPath: parityDir))
             return
         }
 
         if let traceDir = traceInputsDir {
-            try await runWithTraceInputs(modelURL: modelURL, traceDir: URL(fileURLWithPath: traceDir))
+            try await runWithTraceInputs(modelURL: bundleURL, traceDir: URL(fileURLWithPath: traceDir))
             return
         }
 
@@ -102,7 +114,7 @@ struct DiffusionRunner: AsyncParsableCommand {
         }
 
         // Determine pipeline type and dispatch
-        let resolvedDescriptor = try PipelineDescriptor.resolve(at: modelURL, config: configSource)
+        let resolvedDescriptor = try PipelineDescriptor.resolve(at: bundleURL, config: configSource)
         let isFlux2 = resolvedDescriptor.type == .flux2
         let isSd3 = resolvedDescriptor.type == .stableDiffusion3
 
@@ -137,7 +149,7 @@ struct DiffusionRunner: AsyncParsableCommand {
         )
 
         if isFlux2 {
-            let pipeline = try await Flux2Pipeline(from: modelURL, config: configSource, mode: decodeResolution)
+            let pipeline = try await Flux2Pipeline(from: bundleURL, config: configSource, mode: decodeResolution)
 
             // In-context edit path: reference image + instruction via the edit-sequence transformer.
             if let editPath = editImage {
@@ -190,7 +202,7 @@ struct DiffusionRunner: AsyncParsableCommand {
             try saveImage(image, to: outputURL)
             print("Saved: \(output)")
         } else if isSd3 {
-            let pipeline = try await SD3Pipeline(from: modelURL, config: configSource)
+            let pipeline = try await SD3Pipeline(from: bundleURL, config: configSource)
 
             print("Generating (SD 3.x): \"\(prompt)\"")
             print("Steps: \(effectiveSteps), Guidance: \(effectiveGuidance), Seed: \(seed)")
@@ -215,7 +227,7 @@ struct DiffusionRunner: AsyncParsableCommand {
             try saveImage(image, to: outputURL)
             print("Saved: \(output)")
         } else {
-            let pipeline = try await StableDiffusionPipeline.load(from: modelURL, config: configSource)
+            let pipeline = try await StableDiffusionPipeline.load(from: bundleURL, config: configSource)
 
             print("Generating: \"\(prompt)\"")
             print("Steps: \(effectiveSteps), Guidance: \(effectiveGuidance), Seed: \(seed)")
@@ -777,7 +789,7 @@ struct DiffusionRunner: AsyncParsableCommand {
     {
         if asInt32 {
             var array = NDArray(shape: shape, scalarType: .int32)
-            var view = array.mutableView(as: Int32.self)
+            let view = array.mutableView(as: Int32.self)
             view.withUnsafeMutablePointer { ptr, _, _ in
                 for i in 0..<floats.count { ptr[i] = Int32(floats[i]) }
             }
@@ -785,7 +797,7 @@ struct DiffusionRunner: AsyncParsableCommand {
         } else if scalarType == .float16 {
             #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
             var array = NDArray(shape: shape, scalarType: .float16)
-            var view = array.mutableView(as: Float16.self)
+            let view = array.mutableView(as: Float16.self)
             view.withUnsafeMutablePointer { ptr, _, _ in
                 for i in 0..<floats.count { ptr[i] = Float16(floats[i]) }
             }
@@ -795,7 +807,7 @@ struct DiffusionRunner: AsyncParsableCommand {
             #endif
         } else {
             var array = NDArray(shape: shape, scalarType: scalarType ?? .float32)
-            var view = array.mutableView(as: Float.self)
+            let view = array.mutableView(as: Float.self)
             view.withUnsafeMutablePointer { ptr, _, _ in
                 for i in 0..<floats.count { ptr[i] = floats[i] }
             }
@@ -823,12 +835,5 @@ struct DiffusionRunner: AsyncParsableCommand {
 
     private func absmax(_ a: [Float]) -> Float {
         a.map(abs).max() ?? 0
-    }
-}
-
-extension Duration {
-    var inSeconds: Double {
-        let (secs, attoseconds) = self.components
-        return Double(secs) + Double(attoseconds) / 1e18
     }
 }
