@@ -209,7 +209,7 @@ public struct ObjectDetector {
 
         if descriptor.scalarType == .float16 {
             #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
-            let view = imageArray.mutableView(as: Float16.self)
+            var view = imageArray.mutableView(as: Float16.self)
             guard var span = view.contiguousElements else {
                 throw DetectionRuntimeError.invalidConfiguration(
                     "Image input NDArray is not contiguous")
@@ -223,7 +223,7 @@ public struct ObjectDetector {
             fatalError("Float16 is not supported on this platform")
             #endif
         } else {
-            let view = imageArray.mutableView(as: Float.self)
+            var view = imageArray.mutableView(as: Float.self)
             guard var span = view.contiguousElements else {
                 throw DetectionRuntimeError.invalidConfiguration(
                     "Image input NDArray is not contiguous")
