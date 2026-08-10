@@ -39,6 +39,13 @@ public struct Flux2Pipeline: DiffusionPipeline {
     private static let defaultRopeTheta: Float = 2000.0
     private static let qwen3PadTokenId = 151643
 
+    // Linear mu interpolation used by the in-context-edit path (kept separate from
+    // computeEmpiricalMu: the edit path's outputs were validated against this schedule).
+    private static let schedulerBaseShift: Float = 0.5
+    private static let schedulerMaxShift: Float = 1.15
+    private static let schedulerBaseSeqLen: Float = 256
+    private static let schedulerMaxSeqLen: Float = 4096
+
     /// FLUX.2 flow-matching timestep shift.
     ///
     /// Mirrors diffusers `compute_empirical_mu` (diffusers 0.37.1):

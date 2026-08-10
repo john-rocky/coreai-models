@@ -159,7 +159,7 @@ struct DiffusionRunner: AsyncParsableCommand {
                 }
                 let editName = decodeResolution == .half ? "Transformer_edit_512.aimodel" : "Transformer_edit.aimodel"
                 let editTransformer = CoreAIDiffusionModelFunction(
-                    modelURL: modelURL.appendingPathComponent(editName))
+                    modelURL: bundleURL.appendingPathComponent(editName))
                 print("Editing (FLUX.2): \"\(instruction)\"  [\(editName)]")
                 print("Steps: \(effectiveSteps), Seed: \(seed)")
                 let start = ContinuousClock.now
