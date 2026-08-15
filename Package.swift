@@ -207,6 +207,20 @@ let package = Package(
             ]
         ),
 
+        // Lossless n-gram speculative decoding on a dense decode bundle: the verify-row
+        // gate, the c_v cost sweep, and the accept/rollback loop itself.
+        .executableTarget(
+            name: "spec-decode",
+            dependencies: [
+                "CoreAILanguageModels",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "swift/Sources/Tools/spec-decode",
+            swiftSettings: [
+                .enableUpcomingFeature("MemberImportVisibility")
+            ]
+        ),
+
         // Public LLM Benchmark CLI (based on mlx-lm benchmark)
         .executableTarget(
             name: "llm-benchmark",
