@@ -48,7 +48,7 @@ public struct CoreAILanguageModel: LanguageModel {
         if supportsToolCalling { caps.append(.toolCalling) }
         if supportsReasoning { caps.append(.reasoning) }
         if engine.supportsLogits { caps.append(.guidedGeneration) }
-        return LanguageModelCapabilities(capabilities: caps)
+        return LanguageModelCapabilities(caps)
     }
 
     public var executorConfiguration: CoreAIExecutor.Configuration {
