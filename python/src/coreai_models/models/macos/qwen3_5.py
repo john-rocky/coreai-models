@@ -53,6 +53,9 @@ class Qwen3_5Config:
     linear_conv_kernel_dim: int = 4
     full_attention_interval: int = 4
     layer_types: list[str] = field(default_factory=list)
+    # Interleaved mRoPE sections (T, H, W) over rotary_dim//2 frequencies; only
+    # the VL embeddings path uses them (text-only collapses to plain RoPE).
+    mrope_section: tuple = (11, 11, 10)
 
     @property
     def rotary_dim(self) -> int:
@@ -217,6 +220,54 @@ def _gated_delta_step(
     return out.to(input_dtype), state.to(input_dtype)
 
 
+def _gated_delta_step_unroll(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    use_qk_l2_norm: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Static-S UNROLLED step-form gated-delta scan — ``_gated_delta_step``'s recurrence
+    repeated S times in-graph (python loop at trace time, so S must be a static int).
+    No ``while_loop`` and no triangular inverse: for a small static-S verify graph this
+    trades the chunk path's fixed doubling-inverse cost for S tiny sequential steps.
+
+    Shapes as ``_gated_delta_chunk``: query/key ``[b,h,S,dk]``, value ``[b,h,S,dv]``,
+    g/beta ``[b,h,S]``, initial_state ``[b,h,dk,dv]``. Returns
+    ``(out [b,S,h,dv], new_state [b,h,dk,dv])``.
+    """
+    input_dtype = query.dtype
+
+    def l2norm(x: torch.Tensor) -> torch.Tensor:
+        return x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + 1e-6)
+
+    if use_qk_l2_norm:
+        query = l2norm(query)
+        key = l2norm(key)
+    query, key, value, beta, g = (t.to(torch.float32) for t in (query, key, value, beta, g))
+    query = query * (query.shape[-1] ** -0.5)
+    state = initial_state.to(torch.float32)
+    g_exp = g.exp()
+
+    outs = []
+    for t in range(query.shape[2]):
+        q_t = query[:, :, t, :].unsqueeze(-1)            # [b,h,dk,1]
+        k_t = key[:, :, t, :].unsqueeze(-1)              # [b,h,dk,1]
+        v_t = value[:, :, t, :]                          # [b,h,dv]
+        g_t = g_exp[:, :, t].unsqueeze(-1).unsqueeze(-1)  # [b,h,1,1]
+        beta_t = beta[:, :, t].unsqueeze(-1)             # [b,h,1]
+
+        state = state * g_t
+        kv_mem = (state * k_t).sum(dim=-2)               # [b,h,dv]
+        delta = ((v_t - kv_mem) * beta_t).unsqueeze(-2)  # [b,h,1,dv]
+        state = state + k_t * delta                      # [b,h,dk,dv]
+        outs.append((state * q_t).sum(dim=-2).unsqueeze(1))  # [b,1,h,dv]
+    out = torch.cat(outs, dim=1)                         # [b,S,h,dv]
+    return out.to(input_dtype), state.to(input_dtype)
+
+
 def _gated_delta_chunk(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -242,6 +293,11 @@ def _gated_delta_chunk(
 
     ``doublings`` must satisfy ``2**doublings >= S`` for an exact inverse (M strictly-lower is
     nilpotent so the extra factors are identity); 12 covers the 4096 max context.
+
+    Chunk-size ceiling (2026-08-17, 27B eager/MPS): a 74-token chunk produced a
+    degenerate stream EVEN with these fp32 internals — the known chunk>=64
+    blowup is not only an in-graph-fp16 problem. Feed chunks <=16 (the
+    parity-gated range) when driving this path eagerly (teacher-forced probes).
     """
     input_dtype = query.dtype
 
@@ -331,6 +387,15 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         # chunks (the in-graph fp16 doubling-inverse NaNs at chunk>=64). Takes precedence.
         self.use_metal_chunk = False
         self.metal_chunk = None
+        # When True and the traced query length is a static int, the scan is the
+        # step recurrence unrolled S times in-graph (`_gated_delta_step_unroll`) —
+        # decode-exact math, no doubling inverse. For static-S verify graphs.
+        # Takes precedence over use_loopfree_chunk.
+        self.use_loopfree_unroll = False
+        # Doubling rounds for the chunk scan's triangular inverse. 12 covers the
+        # 4096 dynamic prefill; a static-S verify graph only needs
+        # ceil(log2(S)) (2**d >= S — M is nilpotent, extra factors are identity).
+        self.chunk_doublings = 12
 
     def forward(
         self,
@@ -367,6 +432,21 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             new_conv = w[..., -(self.kernel - 1):]  # [b, conv_dim, kernel-1]
             initial_state = rec_in
 
+        if self.use_metal_chunk:
+            # Kernel-boundary rule (178056451): the custom-op binder rejects strided-view
+            # edges and MPSGraph values carry no strides, so the transposed q/k/v/g/beta
+            # tensors below must never feed the kernel. Hand it the conv-native activation
+            # and the un-transposed g/beta; the q/k/v split, (h,dk) split, GVA mapping and
+            # qk-norm all happen inside the kernel (see qwen3_5_gdn_metal).
+            out, new_rec = self.metal_chunk(conv, g, beta, initial_state)  # fp32 kernel scan
+            out = out.reshape(-1, self.dv)
+            out = self.norm(out, z.reshape(-1, self.dv))
+            out = out.reshape(b, s, self.value_dim)
+            out = self.out_proj(out)
+            if conv_in is None:
+                return out
+            return out, new_conv, new_rec
+
         mixed = conv.transpose(1, 2)  # [b,s,conv_dim]
         q, k, v = torch.split(mixed, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
         q = q.reshape(b, s, self.num_k, self.dk).transpose(1, 2)  # [b,num_k,s,dk]
@@ -385,12 +465,24 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         g = g.transpose(1, 2)  # [b,num_v,s]
         beta = beta.transpose(1, 2)
 
-        if self.use_metal_chunk:
-            out, new_rec = self.metal_chunk(q, k, v, g, beta, initial_state)  # fp32 kernel scan
-        elif self.use_loopfree_chunk:
-            out, new_rec = _gated_delta_chunk(
+        if self.use_loopfree_unroll and isinstance(s, int):
+            out, new_rec = _gated_delta_step_unroll(
                 q, k, v, g, beta, initial_state, self.gdu.use_qk_l2_norm
-            )  # loop-free chunked scan (chunked prefill + S==1 decode, device-lowerable)
+            )  # static-S unrolled step scan (verify graphs)
+        elif self.use_loopfree_chunk:
+            if isinstance(s, int) and s == 1:
+                # Static S=1 trace (multifunction decode entrypoint): the chunk
+                # scan reduces to the single step, so emit the cheap step graph
+                # instead of 12 doubling matmuls per layer. Dynamic-S exports
+                # (s is a SymInt) keep the chunk path unchanged.
+                out, new_rec = _gated_delta_step(
+                    q, k, v, g, beta, initial_state, self.gdu.use_qk_l2_norm
+                )
+            else:
+                out, new_rec = _gated_delta_chunk(
+                    q, k, v, g, beta, initial_state, self.gdu.use_qk_l2_norm,
+                    doublings=self.chunk_doublings,
+                )  # loop-free chunked scan (chunked prefill + S==1 decode, device-lowerable)
         elif self.use_loopfree_step:
             out, new_rec = _gated_delta_step(
                 q, k, v, g, beta, initial_state, self.gdu.use_qk_l2_norm
@@ -508,6 +600,7 @@ class Qwen3_5Model(nn.Module):
         kv_cache: KVCache,
         conv_cache: SSMState,
         rec_cache: SSMState,
+        return_prenorm: bool = False,
     ) -> torch.Tensor:
         """Stateful prefill/decode. ``input_ids`` carries the query tokens
         ([b, query_len]); ``position_ids`` carries the full positions
@@ -516,7 +609,8 @@ class Qwen3_5Model(nn.Module):
         counter; linear layers index the SSM caches by linear-layer counter.
         """
         return self.forward_stateful_core(
-            self.embed_tokens(input_ids), position_ids, kv_cache, conv_cache, rec_cache
+            self.embed_tokens(input_ids), position_ids, kv_cache, conv_cache, rec_cache,
+            return_prenorm=return_prenorm,
         )
 
     def forward_stateful_core(
@@ -526,6 +620,8 @@ class Qwen3_5Model(nn.Module):
         kv_cache: KVCache,
         conv_cache: SSMState,
         rec_cache: SSMState,
+        cos_sin: "tuple[torch.Tensor, torch.Tensor] | None" = None,
+        return_prenorm: bool = False,
     ) -> torch.Tensor:
         """Stateful hybrid core on pre-computed embeddings (the head-split path):
         the giant tied embed/lm_head table (≈⅓ of this large-vocab model) stays on
@@ -533,13 +629,20 @@ class Qwen3_5Model(nn.Module):
         the converted decode core holds only the transformer. Returns the final-norm
         hidden state ([b, query_len, hidden]). ``forward_stateful`` is this with an
         in-graph embed lookup in front.
+
+        ``cos_sin`` overrides the in-graph plain-RoPE tables with precomputed
+        [b, query_len, rotary_dim] cos/sin — the VL embeddings path passes the
+        interleaved-mRoPE blend here; text callers leave it None.
         """
         query_len = inputs_embeds.shape[1]
         seq_len = position_ids.shape[1]
         offset = seq_len - query_len
-        q_pos = position_ids.narrow(1, offset, query_len)  # positions of the query tokens
         h = inputs_embeds
-        cos, sin = self.rope_cos_sin(q_pos)
+        if cos_sin is None:
+            q_pos = position_ids.narrow(1, offset, query_len)  # query-token positions
+            cos, sin = self.rope_cos_sin(q_pos)
+        else:
+            cos, sin = cos_sin
         full_idx = 0
         lin_idx = 0
         for layer in self.layers:
@@ -551,6 +654,10 @@ class Qwen3_5Model(nn.Module):
                 h = layer(h, cos, sin, conv_cache=conv_cache, rec_cache=rec_cache,
                           lin_idx=lin_idx)
                 lin_idx += 1
+        if return_prenorm:
+            # (post-final-norm, pre-final-norm) — the MTP drafter path needs the
+            # raw residual stream alongside the normed head input.
+            return self.norm(h), h
         return self.norm(h)
 
 
@@ -619,6 +726,10 @@ class Qwen3_5ForCausalLMStateful(nn.Module):
         # generation loop needs and is what makes the dynamic (one-graph) export
         # runnable on the Core AI runtime (which can't infer dynamic output shapes).
         self.last_token_only = False
+        # None (default) keeps the single-`logits` graph. "pre"/"post" adds a
+        # second `hidden` output ([b, query_len, hidden], pre- or post-final-norm)
+        # for the MTP drafter — additive, logits unchanged.
+        self.emit_hidden: str | None = None
 
     def forward(
         self,
@@ -632,6 +743,13 @@ class Qwen3_5ForCausalLMStateful(nn.Module):
         kv = KVCache(k_cache, v_cache)
         conv = SSMState(conv_state)
         rec = SSMState(rec_state)
+        if self.emit_hidden is not None:
+            post, pre = self.model.forward_stateful(
+                input_ids, position_ids, kv, conv, rec, return_prenorm=True)
+            if self.last_token_only:
+                post, pre = post[:, -1:, :], pre[:, -1:, :]
+            hidden = pre if self.emit_hidden == "pre" else post
+            return self.lm_head(post), hidden
         h = self.model.forward_stateful(input_ids, position_ids, kv, conv, rec)
         if self.last_token_only:
             h = h[:, -1:, :]
@@ -826,6 +944,7 @@ def qwen3_5_config_from_hf(hf_text_config, max_context_length=None, num_layers=N
         linear_conv_kernel_dim=g("linear_conv_kernel_dim"),
         full_attention_interval=g("full_attention_interval"),
         layer_types=layer_types,
+        mrope_section=tuple(rope.get("mrope_section", (11, 11, 10))),
     )
 
 
@@ -847,6 +966,7 @@ class Qwen3_5StatefulForCausalLM(BaseForCausalLM):
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.last_token_only = False
+        self.emit_hidden: str | None = None
 
     def _mutate_state_dict(self, state_dict: dict[str, torch.Tensor]) -> None:
         # Param names already match HF (no q/k/v fusion); nothing to rewrite.
@@ -930,3 +1050,134 @@ class Qwen3_5StatefulForCausalLM(BaseForCausalLM):
         if meta_params:
             raise RuntimeError(f"Parameters not loaded: {meta_params}")
         return model
+
+
+# --------------------------------------------------------------------------- #
+# VL embeddings path: inputs_embeds decoder with interleaved mRoPE
+# --------------------------------------------------------------------------- #
+def _mrope_freq_masks(n_freqs: int, section) -> torch.Tensor:
+    """[3, n_freqs] 0/1 masks: which of the T/H/W position planes rotates each
+    frequency. Interleaved layout (HF ``apply_interleaved_mrope``): freq j comes
+    from H if j % 3 == 1 and j < 3*section[1], from W if j % 3 == 2 and
+    j < 3*section[2], else from T. Text tokens have T == H == W, so the blend
+    collapses to plain RoPE there — bit-identical to the text decode graph.
+    """
+    m = [[0.0] * n_freqs for _ in range(3)]
+    for j in range(n_freqs):
+        if j % 3 == 1 and j < 3 * section[1]:
+            m[1][j] = 1.0
+        elif j % 3 == 2 and j < 3 * section[2]:
+            m[2][j] = 1.0
+        else:
+            m[0][j] = 1.0
+    return torch.tensor(m)
+
+
+class Qwen3_5VLStatefulEmbeds(Qwen3_5StatefulForCausalLM):
+    """Embeddings-input stateful decoder — the VISION path of the Qwen3.8 VLM.
+
+    Same hybrid prefill/decode graph as the shipped text bundle, with two
+    changes so image content can ride it:
+
+    * ``inputs_embeds`` replaces ``input_ids``: the host gathers text rows from
+      the (shipped alongside) embed table and splices the vision tower's rows
+      at the ``<|image_pad|>`` positions before calling the graph.
+    * real interleaved mRoPE: three int32 rope-position planes
+      ``pos_t/pos_h/pos_w [b, query_len]`` (from the HF ``get_rope_index``
+      convention: text ramps, image tokens self-locate on the merged grid,
+      post-image text resumes at start + max(H, W)). For text-only sequences
+      all three planes are equal and the graph reduces to the text decoder's
+      plain partial RoPE.
+
+    forward(inputs_embeds, position_ids, pos_t, pos_h, pos_w, k_cache, v_cache,
+    conv_state, rec_state) -> logits. ``position_ids`` stays the [b, seq_len]
+    cache-indexing ramp (offset = seq_len - query_len), exactly like the text
+    graph; the rope planes are separate because after an image the two ramps
+    genuinely diverge.
+    """
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.Tensor,
+        pos_t: torch.Tensor,
+        pos_h: torch.Tensor,
+        pos_w: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        conv_state: torch.Tensor,
+        rec_state: torch.Tensor,
+    ) -> torch.Tensor:
+        kv = KVCache(k_cache, v_cache)
+        conv = SSMState(conv_state)
+        rec = SSMState(rec_state)
+        inv = self.model.inv_freq  # [rotary_dim/2] fp32
+        masks = _mrope_freq_masks(inv.shape[0], self.config.mrope_section).to(inv.dtype)
+        freqs = (
+            pos_t[..., None].float() * inv * masks[0]
+            + pos_h[..., None].float() * inv * masks[1]
+            + pos_w[..., None].float() * inv * masks[2]
+        )  # [b, s, rotary_dim/2]
+        emb = torch.cat([freqs, freqs], dim=-1)
+        h = self.model.forward_stateful_core(
+            inputs_embeds, position_ids, kv, conv, rec, cos_sin=(emb.cos(), emb.sin())
+        )
+        if self.last_token_only:
+            h = h[:, -1:, :]
+        return self.lm_head(h)
+
+    def build_vl_export_spec(
+        self,
+        target_dtype: torch.dtype,
+        max_context_length: int,
+        query_len: int,
+        trace_kv_len: int,
+        trace_past: int = 64,
+    ) -> dict:
+        """Static-S entrypoint spec (multifunction idiom: 'main' S=1 decode +
+        'prefill' S=chunk). ``inputs_embeds`` and the rope planes are STATIC
+        [1, S]; ``position_ids`` (total length) and the KV seq dim stay dynamic.
+        Static outputs make the graph runnable on the python runtime, and a
+        static ids dim avoids the MPSGraph dynamic-ids GPURegionRuntime crash
+        (the pf64 lesson from the Qwen3-VL port).
+        """
+        cfg = self.config
+        S = query_len
+        inputs_embeds = torch.zeros(1, S, cfg.hidden_size, dtype=target_dtype)
+        position_ids = torch.arange(trace_past + S, dtype=torch.int32).unsqueeze(0)
+        pos_plane = torch.arange(trace_past, trace_past + S, dtype=torch.int32).unsqueeze(0)
+        state = build_decode_state(cfg, max_seq_len=trace_kv_len, dtype=target_dtype)
+        reference_inputs = {
+            "inputs_embeds": inputs_embeds,
+            "position_ids": position_ids,
+            "pos_t": pos_plane.clone(),
+            "pos_h": pos_plane.clone(),
+            "pos_w": pos_plane.clone(),
+            "k_cache": state["k_cache"],
+            "v_cache": state["v_cache"],
+            "conv_state": state["conv_state"],
+            "rec_state": state["rec_state"],
+        }
+        # First chunk runs at seq_len == S (offset 0), so the position dim's
+        # min must admit it.
+        seq_pos = torch.export.Dim("seq_pos", min=max(2, S), max=max_context_length - 1)
+        k_seq = torch.export.Dim("k_seq", min=trace_kv_len, max=max_context_length)
+        v_seq = torch.export.Dim("v_seq", min=trace_kv_len, max=max_context_length)
+        dynamic_shapes = {
+            "inputs_embeds": None,
+            "position_ids": {1: seq_pos},
+            "pos_t": None,
+            "pos_h": None,
+            "pos_w": None,
+            "k_cache": {KVCache.seq_len_dim(): k_seq},
+            "v_cache": {KVCache.seq_len_dim(): v_seq},
+            "conv_state": None,
+            "rec_state": None,
+        }
+        return {
+            "reference_inputs": reference_inputs,
+            "dynamic_shapes": dynamic_shapes,
+            "input_names": ("inputs_embeds", "position_ids", "pos_t", "pos_h", "pos_w"),
+            "output_names": ("logits",),
+            "state_names": DECODE_STATE_NAMES,
+        }
