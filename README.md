@@ -1,3 +1,30 @@
+# Core AI Models — community fork (`-zoo`)
+
+> **This is an unofficial community fork of [`apple/coreai-models`](https://github.com/apple/coreai-models).**
+> It is **not affiliated with, endorsed by, or supported by Apple Inc.** "Core AI" and
+> "Apple" are trademarks of Apple Inc.; this fork uses them only to identify the upstream
+> project, not to endorse or promote this fork (BSD 3-Clause §3). For the official, supported
+> project go to [`apple/coreai-models`](https://github.com/apple/coreai-models).
+>
+> **What this branch is.** Upstream `main` through #207 (2026-08-28) plus the zoo patches,
+> on branch `zoo-0.4` / tag `0.2.3-zoo`. Everything not listed below is byte-for-byte upstream.
+>
+> - **Community model ports** under `python/src/coreai_models/models/` — files marked
+>   `Community port — NOT an Apple model` (ternary/1-bit, speech, OCR, MoE, MLA and hybrid
+>   SSM decoders). Bundles built from them are published at
+>   [huggingface.co/mlboydaisuke](https://huggingface.co/mlboydaisuke).
+> - **Pipelined engine**: loads decode-only S=1 bundles (`logitsSeqIsStatic` guard, reported
+>   upstream as apple/coreai-models#212), discovers a static-chunk `prefill` function in
+>   multifunction bundles, supports per-token inputs, and caps iOS dynamic-KV capacity at 1024
+>   (guard for apple/coreai-models#124).
+> - **Export**: `build_macos_export_spec` / `export_core()` shims for the hybrid ports on top
+>   of upstream's export contract, plus multifunction export.
+>
+> **Tags.** Use `0.2.3-zoo` or later. `0.2.2-zoo` and earlier predate upstream #121 (the
+> pipelined sampling fix) and produce corrupted text at temperature > 0.
+
+---
+
 # Core AI Models
 
 Model export recipes, Python primitives, and Swift runtime utilities for building on-device AI with [Core AI](https://developer.apple.com/documentation/coreai).
