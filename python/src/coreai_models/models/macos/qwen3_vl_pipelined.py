@@ -1,7 +1,4 @@
-# Copyright 2026 Apple Inc.
-#
-# Use of this source code is governed by a BSD-3-clause license that can
-# be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+# Community port — NOT an Apple model. BSD-3-Clause (see LICENSE).
 
 """Qwen3-VL shaped for Apple's pipelined GPU engine (text decoder) + a static
 vision encoder — the zoo's first VLM rider.

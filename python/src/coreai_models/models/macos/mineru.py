@@ -1,7 +1,4 @@
-# Copyright 2026 Apple Inc.
-#
-# Use of this source code is governed by a BSD-3-clause license that can
-# be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
+# Community port — NOT an Apple model. BSD-3-Clause (see LICENSE).
 
 """MinerU2.5-Pro (opendatalab/MinerU2.5-Pro-2605-1.2B, Apache-2.0) shaped for
 Apple's pipelined GPU engine — the zoo's whole-page doc-OCR rider.
