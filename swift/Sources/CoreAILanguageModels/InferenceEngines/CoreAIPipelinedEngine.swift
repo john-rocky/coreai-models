@@ -1361,17 +1361,16 @@ private struct EngineImpl: ~Copyable {
         }
 
         do {
-            // Order the sampler behind this step's logits write. The model's encode work
-            // is committed to the SHARED Metal queue from the stream's internal task
-            // machinery, asynchronously — a command buffer committed directly from here
-            // can jump ahead of a still-open stream batch and read a not-yet-written
-            // logits row (observed: bogus sampled token from a zeroed row at every
-            // post-drain boundary). The stream's only public ordering primitive is this
-            // full drain; it costs ~30% pipelined decode throughput. (Tried: silgen-
-            // shimming the internal appendTask to commit the sampler from the stream's
-            // task queue — its execution model reorders against subsequent encodes and
-            // scrambles decode entirely. A real fix needs an upstream/SDK ordering API.)
-            await computeStream.currentWorkCompleted()
+            // No drain before the sampler. The fork once put `await
+            // computeStream.currentWorkCompleted()` here (427a05b) against a bogus first
+            // token sampled from a not-yet-written logits row, observed under the
+            // composite sampler before upstream #121 gave that sampler a per-call
+            // execution descriptor. Re-measured on top of #121 (macOS, qwen3-0.6b 4-bit
+            // dynamic, release, drain vs. none interleaved): greedy output token-identical
+            // across 46 runs and 72 turn boundaries, no repetition or doubled punctuation
+            // at temperature 0.7 in 46 runs, and decode +43-52% without the drain. The
+            // model step and the sampler share `pipelineQueue`, as upstream's own
+            // constrained path relies on. Not yet measured on iOS.
             // Use penalty-aware path for decode steps when penalty is active.
             if queryLength == 1, let state = penaltyState,
                 let compositeSampler = localGPUSampler as? MPSGraphCompositeSampler,
