@@ -7,7 +7,7 @@
 > project go to [`apple/coreai-models`](https://github.com/apple/coreai-models).
 >
 > **What this branch is.** Upstream `main` through #207 (2026-08-28) plus the zoo patches,
-> on branch `zoo-0.4` / tag `0.2.3-zoo`. Everything not listed below is byte-for-byte upstream.
+> on branch `zoo-0.4` / tag `0.2.4-zoo`. Everything not listed below is byte-for-byte upstream.
 >
 > - **Community model ports** under `python/src/coreai_models/models/` — files marked
 >   `Community port — NOT an Apple model` (ternary/1-bit, speech, OCR, MoE, MLA and hybrid
@@ -20,8 +20,10 @@
 > - **Export**: `build_macos_export_spec` / `export_core()` shims for the hybrid ports on top
 >   of upstream's export contract, plus multifunction export.
 >
-> **Tags.** Use `0.2.3-zoo` or later. `0.2.2-zoo` and earlier predate upstream #121 (the
-> pipelined sampling fix) and produce corrupted text at temperature > 0.
+> **Tags.** Use `0.2.4-zoo` or later. `0.2.4-zoo` drops the fork's sampler drain, which upstream
+> #121 made redundant — decode +43–52% on macOS (qwen3-0.6b, measured drain vs. none; iOS not yet
+> measured). `0.2.2-zoo` and earlier predate upstream #121 (the pipelined sampling fix) and
+> produce corrupted text at temperature > 0.
 
 ---
 
