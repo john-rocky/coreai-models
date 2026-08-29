@@ -761,14 +761,20 @@ private struct EngineImpl: ~Copyable {
         // Create growing logits buffer (reuses TensorStorage+CoreAI.swift).
         // With a prefill graph, `function` only ever sees one token, so a prompt-sized
         // logits buffer — hundreds of MB at large vocabularies — would go unused.
+        // A fully static logits output (e.g. a decode-only S=1 graph: [1, 1, vocab])
+        // can't be resolved at a larger capacity — size the buffer to its static
+        // sequence length instead of the prompt-sized default.
+        let logitsSeqIsStatic = logitsDesc.shape.count >= 2 && logitsDesc.shape[1] > 0
         let logitsRef = try GrowingLogitsBuffer(
             device: device,
             descriptor: descriptor,
             name: logitsOutputName,
             vocabSize: config.vocabSize,
-            maxCapacity: config.maxContextLength,
-            initialCapacity: prefillLogitsInitialCapacity(
-                hasPrefillGraph: prefillFn != nil, averagePromptSize: averageExpectedPromptSize)
+            maxCapacity: logitsSeqIsStatic ? logitsDesc.shape[1] : config.maxContextLength,
+            initialCapacity: logitsSeqIsStatic
+                ? logitsDesc.shape[1]
+                : prefillLogitsInitialCapacity(
+                    hasPrefillGraph: prefillFn != nil, averagePromptSize: averageExpectedPromptSize)
         )
 
         // Load inference function
