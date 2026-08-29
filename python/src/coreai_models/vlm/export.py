@@ -35,6 +35,7 @@ from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from transformers import AutoConfig, AutoTokenizer
 
+from coreai_models._constants import DEFAULT_INCLUDE_DEBUG_INFO
 from coreai_models.export.macos import export_to_coreai
 from coreai_models.export.metadata import build_aimodel_metadata
 from coreai_models.models.macos.qwen3_vl import Qwen3VLForCausalLMEmbeddings
@@ -209,7 +210,12 @@ def _load_embed_weight(model_dir: str) -> torch.Tensor:
 
 
 async def export_embed_model(
-    spec: VLMSpec, bundle_path: Path, model_dir: str, max_ctx: int, overwrite: bool
+    spec: VLMSpec,
+    bundle_path: Path,
+    model_dir: str,
+    max_ctx: int,
+    overwrite: bool,
+    include_debug_info: bool = DEFAULT_INCLUDE_DEBUG_INFO,
 ) -> str:
     """Export the token-embedding lookup as embed.aimodel (asset role `embedding`)."""
     weight = _load_embed_weight(model_dir)
@@ -225,6 +231,7 @@ async def export_embed_model(
         input_names=("input_ids",),
         output_names=("embeddings",),
         state_names=None,
+        include_debug_info=include_debug_info,
     )
     program.optimize()
 
@@ -251,6 +258,7 @@ async def export_text_bundle(
     num_layers: int | None,
     output_dir: Path,
     overwrite: bool,
+    include_debug_info: bool = DEFAULT_INCLUDE_DEBUG_INFO,
 ) -> Path:
     """Download weights and write the text portion of the VLM bundle.
 
@@ -327,6 +335,7 @@ async def export_text_bundle(
         input_names=("inputs_embeds", "position_ids"),
         output_names=("logits",),
         state_names=KV_STATE_NAMES,
+        include_debug_info=include_debug_info,
     )
     logging.info("Optimizing AIProgram...")
     program.optimize()
@@ -348,7 +357,9 @@ async def export_text_bundle(
 
     # ---- 6. Embed model ----
     logging.info("Exporting embed.aimodel...")
-    embed_rel = await export_embed_model(spec, bundle_path, model_dir, max_ctx, overwrite)
+    embed_rel = await export_embed_model(
+        spec, bundle_path, model_dir, max_ctx, overwrite, include_debug_info=include_debug_info
+    )
 
     # ---- 7. Tokenizer ----
     logging.info("Saving tokenizer...")
@@ -412,8 +423,13 @@ class StaticVisionEncoder(nn.Module):
     produces) and reproduces the Qwen image-processor patchify internally, so the
     runner needs no Qwen-specific preprocessing beyond resize + normalize.
 
-    Input:  pixel_values  float32 [1, 3, image_size, image_size]  (CLIP-normalized, NCHW)
-    Output: image_features float32 [num_visual_tokens, text_hidden]
+    Single-image (num_frames=1):
+      Input:  pixel_values  float32 [1, 3, image_size, image_size]
+      Output: image_features float32 [num_visual_tokens, text_hidden]
+
+    Multi-frame (num_frames>1, must be divisible by temporal_patch_size):
+      Input:  pixel_values  float32 [1, 3*num_frames, image_size, image_size]
+      Output: image_features float32 [grid_t * num_visual_tokens, text_hidden]
     """
 
     def __init__(
@@ -424,6 +440,7 @@ class StaticVisionEncoder(nn.Module):
         patch_size: int,
         spatial_merge_size: int,
         temporal_patch_size: int,
+        num_frames: int = 1,
     ) -> None:
         super().__init__()
         self.patch_embed = visual_model.patch_embed
@@ -435,49 +452,56 @@ class StaticVisionEncoder(nn.Module):
         self.spatial_merge_size = spatial_merge_size
         self.temporal_patch_size = temporal_patch_size
         self.channels = 3
-        # Fixed grid for image_size x image_size.
-        self.grid_t = 1
+        self.num_frames = num_frames
+
+        if num_frames == 1:
+            self.grid_t = 1
+        elif num_frames % temporal_patch_size != 0:
+            raise ValueError(
+                f"num_frames ({num_frames}) must be divisible by "
+                f"temporal_patch_size ({temporal_patch_size})"
+            )
+        else:
+            self.grid_t = num_frames // temporal_patch_size
         self.grid_h = image_size // patch_size
         self.grid_w = image_size // patch_size
-        self.num_patches = self.grid_h * self.grid_w
+        self.num_patches = self.grid_t * self.grid_h * self.grid_w
         self.patch_dim = temporal_patch_size * self.channels * patch_size * patch_size
 
         grid_thw = torch.tensor([[self.grid_t, self.grid_h, self.grid_w]], dtype=torch.int32)
 
         with torch.no_grad():
-            # Position embeddings [num_patches, vision_hidden]
             pos_embeds = visual_model.fast_pos_embed_interpolate(grid_thw)
             self.register_buffer("pos_embeds", pos_embeds)
 
-            # Rotary position embeddings
-            rotary_pos_emb = visual_model.rot_pos_emb(grid_thw)  # [num_patches, rot_dim/2]
+            rotary_pos_emb = visual_model.rot_pos_emb(grid_thw)
             seq_len = rotary_pos_emb.shape[0]
             rotary_flat = rotary_pos_emb.reshape(seq_len, -1)
-            emb = torch.cat([rotary_flat, rotary_flat], dim=-1)  # [num_patches, rot_dim]
+            emb = torch.cat([rotary_flat, rotary_flat], dim=-1)
             self.register_buffer("rot_cos", emb.cos())
             self.register_buffer("rot_sin", emb.sin())
 
-            # cu_seqlens for variable-length attention: [0, num_patches]
-            # For single image batch: [0, GRID_T * GRID_H * GRID_W]
             total_patches = self.grid_t * self.grid_h * self.grid_w
             cu = torch.tensor([0, total_patches], dtype=torch.int32)
             self.register_buffer("cu_seqlens", cu)
 
     def _patchify(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """Turn NCHW pixels into Qwen's pre-patchified [num_patches, patch_dim].
+        """Turn pixels into Qwen's pre-patchified [num_patches, patch_dim].
 
-        Reproduces the exact reshape/permute of Qwen2/3-VL's image processor
-        (transpose order ``(0,3,6,4,7,2,1,5,8)``) so the resulting patch order
-        matches both the precomputed ``pos_embeds`` and the merger's 2×2
-        spatial-merge grouping. The single image is duplicated across the
-        temporal dimension, matching the processor's last-frame repeat.
+        Single-image: [1, 3, H, W] → duplicate across temporal dim.
+        Multi-frame:  [1, 3*N, H, W] → reshape real frames.
         """
         c, patch, merge = self.channels, self.patch_size, self.spatial_merge_size
         hw = self.image_size
-        # [1, 3, H, W] → [3, H, W] → [temporal, 3, H, W]
-        x = pixel_values.reshape(c, hw, hw)
-        x = x.unsqueeze(0).repeat(self.temporal_patch_size, 1, 1, 1)
-        # split H,W into (grid, merge, patch) and T into (grid_t, temporal)
+
+        if self.num_frames == 1:
+            x = pixel_values.reshape(c, hw, hw)
+            x = x.unsqueeze(0).repeat(self.temporal_patch_size, 1, 1, 1)
+        else:
+            # [1, 3*N, H, W] → [N, 3, H, W]
+            x = pixel_values.reshape(self.num_frames, c, hw, hw)
+
+        # [N, C, H, W] → split H,W into (grid, merge, patch), T into (grid_t, temporal)
         x = x.reshape(
             self.grid_t,
             self.temporal_patch_size,
@@ -594,7 +618,13 @@ def _patch_fast_pos_embed_interpolate(vision_model_cls: type) -> None:
     vision_model_cls.fast_pos_embed_interpolate = patched
 
 
-async def export_vision_encoder(spec: VLMSpec, bundle_path: Path, overwrite: bool) -> str:
+async def export_vision_encoder(
+    spec: VLMSpec,
+    bundle_path: Path,
+    overwrite: bool,
+    num_frames: int = 1,
+    include_debug_info: bool = DEFAULT_INCLUDE_DEBUG_INFO,
+) -> str:
     """Export the vision encoder as vision.aimodel and patch metadata.json."""
     from transformers.models.qwen3_vl.modeling_qwen3_vl import (
         Qwen3VLForConditionalGeneration as HFModel,
@@ -622,11 +652,16 @@ async def export_vision_encoder(spec: VLMSpec, bundle_path: Path, overwrite: boo
         patch_size=spec.patch_size,
         spatial_merge_size=spec.spatial_merge_size,
         temporal_patch_size=spec.temporal_patch_size,
+        num_frames=num_frames,
     ).eval()
     del hf_model
 
-    num_visual_tokens = spec.num_visual_tokens
-    pixel_shape = (1, 3, spec.image_size, spec.image_size)
+    grid_t = wrapper.grid_t
+    num_visual_tokens = spec.num_visual_tokens * grid_t
+    if num_frames == 1:
+        pixel_shape = (1, 3, spec.image_size, spec.image_size)
+    else:
+        pixel_shape = (1, 3 * num_frames, spec.image_size, spec.image_size)
 
     # ---- 3. Validate output shape before export ----
     with torch.no_grad():
@@ -677,6 +712,7 @@ async def export_vision_encoder(spec: VLMSpec, bundle_path: Path, overwrite: boo
         dynamic_shapes=None,
         input_names=("pixel_values",),
         output_names=("image_features",),
+        include_debug_info=include_debug_info,
     )
     logging.info("Optimizing AIProgram...")
     program.optimize()
@@ -696,6 +732,11 @@ async def export_vision_encoder(spec: VLMSpec, bundle_path: Path, overwrite: boo
     with open(bundle_path / "metadata.json") as f:
         metadata = json.load(f)
     metadata["assets"]["vision"] = "vision.aimodel"
+    if num_frames > 1:
+        metadata["vision"]["image_token_count"] = num_visual_tokens
+        metadata["vision"]["max_video_frames"] = num_frames
+        metadata["vision"]["tokens_per_frame"] = spec.num_visual_tokens
+        metadata["vision"]["temporal_patch_size"] = spec.temporal_patch_size
     with open(bundle_path / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
@@ -757,6 +798,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export only the text decoder + embedding (skip the vision encoder)",
     )
     parser.add_argument(
+        "--num-frames",
+        type=int,
+        default=1,
+        help="Number of video frames for the vision encoder (default: 1 = single image). "
+        "Must be divisible by temporal_patch_size (2 for Qwen). "
+        "Multi-frame exports bake temporal position embeddings for native video support.",
+    )
+    parser.add_argument(
         "--list-models",
         action="store_true",
         help="List supported VLM short-names and exit",
@@ -765,6 +814,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--overwrite",
         action="store_true",
         help="Overwrite existing output files",
+    )
+    parser.add_argument(
+        "--include-debug-info",
+        action="store_true",
+        help=(
+            "Embed debug information in the exported .aimodel for debugging a conversion. "
+            "Default: off, which embeds minimum debug information and makes the "
+            "exported asset smaller."
+        ),
     )
     parser.add_argument(
         "--verbose",
@@ -783,10 +841,17 @@ async def _run(spec: VLMSpec, args: argparse.Namespace) -> Path:
         num_layers=args.num_layers,
         output_dir=output_dir,
         overwrite=args.overwrite,
+        include_debug_info=args.include_debug_info,
     )
     if not args.skip_vision:
         logging.info("Exporting vision encoder...")
-        await export_vision_encoder(spec, bundle_path, args.overwrite)
+        await export_vision_encoder(
+            spec,
+            bundle_path,
+            args.overwrite,
+            args.num_frames,
+            include_debug_info=args.include_debug_info,
+        )
     return bundle_path
 
 

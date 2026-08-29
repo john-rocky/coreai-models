@@ -161,7 +161,7 @@ public struct StableDiffusionPipeline: DiffusionPipeline {
 
         // Wrap latents back to NDArray for GenerationResult
         var latentsND = NDArray(shape: latentShape, scalarType: .float32)
-        var latentsView = latentsND.mutableView(as: Float.self)
+        let latentsView = latentsND.mutableView(as: Float.self)
         latentsView.withUnsafeMutablePointer { ptr, _, _ in
             for i in 0..<latents.count { ptr[i] = latents[i] }
         }
@@ -227,10 +227,5 @@ public struct StableDiffusionPipeline: DiffusionPipeline {
             throw CoreAIComponentError.invalidShape(
                 "discreteFlow is not supported by StableDiffusionPipeline — use SD3Pipeline or Flux2Pipeline")
         }
-    }
-
-    private func generateNoise(count: Int, seed: UInt32) -> [Float] {
-        var rng = NumPyRandomSource(seed: seed)
-        return (0..<count).map { _ in Float(rng.nextNormal()) }
     }
 }

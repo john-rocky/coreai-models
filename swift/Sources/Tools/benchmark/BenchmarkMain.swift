@@ -123,19 +123,26 @@ struct LLMBenchmark: AsyncParsableCommand {
         let configData = try JSONEncoder().encode(engineConfig)
         print("\n⏳ Preparing AI asset...", terminator: "")
         fflush(stdout)
+        let prepareStart = SuspendingClock.now
         let engine = try await EngineFactory.createEngine(
             config: configData,
             modelURL: modelURL,
             options: try makeEngineOptions()
         )
-        print(cacheHit ? " done (cache hit)" : " done")
+        let prepareSeconds = (SuspendingClock.now - prepareStart).inSeconds
+        let cacheSuffix = cacheHit ? " (cache hit)" : ""
+        print(" done in \(fmt(prepareSeconds))s\(cacheSuffix)")
 
         let prompt = randomPrompt(vocabSize: vocabSize, count: promptTokens, seed: seed)
         let sampling = SamplingConfiguration(temperature: 0)
 
         // Warmup
-        print("\n⚙️  Warming up engine...")
+        print("\n⚙️  Warming up engine...", terminator: "")
+        fflush(stdout)
+        let warmupStart = SuspendingClock.now
         _ = try await runTrial(engine: engine, prompt: prompt, sampling: sampling)
+        let warmupSeconds = (SuspendingClock.now - warmupStart).inSeconds
+        print(" done in \(fmt(warmupSeconds))s")
 
         // Timed trials
         print("\n🔄 Benchmarking with \(promptTokens) prompt tokens, \(generationTokens) generation tokens\n")
@@ -155,6 +162,8 @@ struct LLMBenchmark: AsyncParsableCommand {
         let avgGen = trials.map(\.genTps).reduce(0, +) / n
         print("\n📊 Benchmark Summary:")
         print(String(repeating: "=", count: 50))
+        print("Prepare:    \(fmt(prepareSeconds))s\(cacheSuffix)")
+        print("Warmup:     \(fmt(warmupSeconds))s")
         print("Prompt:     \(fmt(avgPrompt)) tokens/sec")
         print("Generation: \(fmt(avgGen)) tokens/sec")
         print(String(repeating: "=", count: 50))
@@ -165,6 +174,9 @@ struct LLMBenchmark: AsyncParsableCommand {
                 promptTokens: promptTokens,
                 generationTokens: generationTokens,
                 numTrials: numTrials,
+                prepareSeconds: prepareSeconds,
+                cacheHit: cacheHit,
+                warmupSeconds: warmupSeconds,
                 trials: trials,
                 averages: BenchmarkReport.Averages(
                     promptTps: avgPrompt, generationTps: avgGen)
@@ -230,9 +242,7 @@ struct LLMBenchmark: AsyncParsableCommand {
     }
 
     private func seconds(from start: SuspendingClock.Instant, to end: SuspendingClock.Instant) -> Double {
-        let d = end - start
-        let (secs, atto) = d.components
-        return Double(secs) + Double(atto) / 1e18
+        (end - start).inSeconds
     }
 
     private func fmt(_ v: Double) -> String {
@@ -266,6 +276,9 @@ struct BenchmarkReport: Codable {
     let promptTokens: Int
     let generationTokens: Int
     let numTrials: Int
+    let prepareSeconds: Double
+    let cacheHit: Bool
+    let warmupSeconds: Double
     let trials: [TrialResult]
     let averages: Averages
 

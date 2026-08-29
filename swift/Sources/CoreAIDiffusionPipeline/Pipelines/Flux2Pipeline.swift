@@ -11,12 +11,11 @@ import Tokenizers
 
 /// FLUX.2 Klein pipeline using Core AI backend.
 ///
-/// Orchestrates: tokenize → text encode → RoPE compute → noise → pack →
-/// denoise loop (flow-match Euler) → unpack → BN denorm → unpatchify → VAE decode.
+/// Orchestrates: tokenize → text encode → noise → pack → denoise loop
+/// (flow-match Euler) → unpack → BN denorm → unpatchify → VAE decode.
 ///
-/// Key design: RoPE embeddings are pre-computed in Swift and passed as model inputs
-/// (not computed in-graph) to avoid graph optimizer issues on monolithic
-/// 25-block transformers.
+/// RoPE is computed inside the transformer graph; this pipeline only supplies
+/// position IDs, which depend on grid geometry alone.
 public struct Flux2Pipeline: DiffusionPipeline {
     public let descriptor: PipelineDescriptor
     public let mode: DecodeResolution
@@ -36,15 +35,7 @@ public struct Flux2Pipeline: DiffusionPipeline {
     private static let patchSize = 16
     private static let latentChannels = 128
     private static let textSeqLen = 512
-    private static let defaultRopeTheta: Float = 2000.0
     private static let qwen3PadTokenId = 151643
-
-    // Linear mu interpolation used by the in-context-edit path (kept separate from
-    // computeEmpiricalMu: the edit path's outputs were validated against this schedule).
-    private static let schedulerBaseShift: Float = 0.5
-    private static let schedulerMaxShift: Float = 1.15
-    private static let schedulerBaseSeqLen: Float = 256
-    private static let schedulerMaxSeqLen: Float = 4096
 
     /// FLUX.2 flow-matching timestep shift.
     ///
@@ -208,19 +199,18 @@ public struct Flux2Pipeline: DiffusionPipeline {
             packedLatents = noisePacked
         }
 
-        // 6. Pre-compute RoPE embeddings (cos, sin)
+        // 6. Build RoPE position IDs — the transformer computes the frequencies in-graph
         let axesDims = descriptor.ropeAxesDims ?? [32, 32, 32, 32]
-        let theta = descriptor.ropeTheta ?? Self.defaultRopeTheta
-        let (rotaryCos, rotarySin) = computeRotaryEmbeddings(
-            imgHeight: spatialSide, imgWidth: spatialSide,
-            textSeqLen: textSeqLen, axesDims: axesDims, theta: theta
-        )
+        let axisCount = axesDims.count
+        // Image ids put H/W on axes 1/2; text ids put the seq index on the last axis.
+        guard axisCount >= 3 else {
+            throw PipelineLoadError.missingConfig(
+                "rope_axes_dims has \(axisCount) axes; FLUX.2 RoPE needs at least 3")
+        }
+        let imageIds = buildImageIds(side: spatialSide, axisCount: axisCount)
+        let textIds = buildTextIds(textSeqLen: textSeqLen, axisCount: axisCount)
 
         // 7. Denoising loop
-        let totalDim = axesDims.reduce(0, +)
-        let totalSeqLen = textSeqLen + seqLen
-        let ropeShape = [totalSeqLen, totalDim]
-
         for (step, t) in scheduler.timeSteps.enumerated() {
             let timestepValue = Float(t) / 1000.0
 
@@ -229,8 +219,8 @@ public struct Flux2Pipeline: DiffusionPipeline {
                 (textEmbeddings, [1, textSeqLen, hiddenDim(textEmbeddings)]),
                 ([timestepValue], [1]),
                 ([guidanceScale], [1]),
-                (rotaryCos, ropeShape),
-                (rotarySin, ropeShape),
+                (imageIds, [1, seqLen, axisCount]),
+                (textIds, [1, textSeqLen, axisCount]),
             ])
 
             packedLatents = scheduler.step(output: output, timeStep: t, sample: packedLatents)
@@ -288,7 +278,7 @@ public struct Flux2Pipeline: DiffusionPipeline {
         let image = try DiffusionUtilities.pixelsToCGImage(pixels, height: outputHeight, width: outputWidth)
 
         var latentsND = NDArray(shape: latentShape, scalarType: .float32)
-        var latentsView = latentsND.mutableView(as: Float.self)
+        let latentsView = latentsND.mutableView(as: Float.self)
         latentsView.withUnsafeMutablePointer { ptr, _, _ in
             for i in 0..<noise.count { ptr[i] = noise[i] }
         }
@@ -390,71 +380,30 @@ public struct Flux2Pipeline: DiffusionPipeline {
         embeddings.count / Self.textSeqLen
     }
 
-    // MARK: - RoPE Pre-computation
+    // MARK: - RoPE Position IDs
 
-    private func computeRotaryEmbeddings(
-        imgHeight: Int, imgWidth: Int,
-        textSeqLen: Int, axesDims: [Int], theta: Float
-    ) -> ([Float], [Float]) {
-        let imgSeqLen = imgHeight * imgWidth
-        let totalSeqLen = textSeqLen + imgSeqLen
-        let totalDim = axesDims.reduce(0, +)
-
-        var cosScalars = [Float](repeating: 0, count: totalSeqLen * totalDim)
-        var sinScalars = [Float](repeating: 0, count: totalSeqLen * totalDim)
-
-        var axisOffset = 0
-        for (axisIdx, axisDim) in axesDims.enumerated() {
-            let halfDim = axisDim / 2
-
-            var invFreq = [Double](repeating: 0, count: halfDim)
-            for k in 0..<halfDim {
-                let exponent = Double(2 * k) / Double(axisDim)
-                invFreq[k] = 1.0 / pow(Double(theta), exponent)
+    /// `img_ids` for in-graph RoPE: `[1, side*side, axisCount]` flattened row-major,
+    /// one row per image token as [T, H, W, L].
+    private func buildImageIds(side: Int, axisCount: Int) -> [Float] {
+        var ids = [Float](repeating: 0, count: side * side * axisCount)
+        for h in 0..<side {
+            for w in 0..<side {
+                let idx = h * side + w
+                ids[idx * axisCount + 1] = Float(h)
+                ids[idx * axisCount + 2] = Float(w)
             }
-
-            // Text tokens (first in sequence): axis 3 = sequential, others = 0
-            for s in 0..<textSeqLen {
-                let pos: Double = axisIdx == 3 ? Double(s) : 0.0
-                let outBase = s * totalDim + axisOffset
-                for k in 0..<halfDim {
-                    let angle = pos * invFreq[k]
-                    let c = Float(cos(angle))
-                    let sn = Float(sin(angle))
-                    cosScalars[outBase + 2 * k] = c
-                    cosScalars[outBase + 2 * k + 1] = c
-                    sinScalars[outBase + 2 * k] = sn
-                    sinScalars[outBase + 2 * k + 1] = sn
-                }
-            }
-
-            // Image tokens (after text): axis 1 = h, axis 2 = w, others = 0
-            for h in 0..<imgHeight {
-                for w in 0..<imgWidth {
-                    let s = textSeqLen + h * imgWidth + w
-                    let pos: Double
-                    switch axisIdx {
-                    case 1: pos = Double(h)
-                    case 2: pos = Double(w)
-                    default: pos = 0.0
-                    }
-                    let outBase = s * totalDim + axisOffset
-                    for k in 0..<halfDim {
-                        let angle = pos * invFreq[k]
-                        let c = Float(cos(angle))
-                        let sn = Float(sin(angle))
-                        cosScalars[outBase + 2 * k] = c
-                        cosScalars[outBase + 2 * k + 1] = c
-                        sinScalars[outBase + 2 * k] = sn
-                        sinScalars[outBase + 2 * k + 1] = sn
-                    }
-                }
-            }
-
-            axisOffset += axisDim
         }
+        return ids
+    }
 
-        return (cosScalars, sinScalars)
+    /// `txt_ids` for in-graph RoPE: `[1, textSeqLen, axisCount]` flattened row-major.
+    /// Text tokens are [0, 0, 0, s] — sequence index on the last axis, spatial unused.
+    private func buildTextIds(textSeqLen: Int, axisCount: Int) -> [Float] {
+        var ids = [Float](repeating: 0, count: textSeqLen * axisCount)
+        for s in 0..<textSeqLen {
+            ids[s * axisCount + (axisCount - 1)] = Float(s)
+        }
+        return ids
     }
 
     // MARK: - Latent Packing/Unpacking
@@ -586,13 +535,6 @@ public struct Flux2Pipeline: DiffusionPipeline {
             }
         }
         return result
-    }
-
-    // MARK: - Noise Generation
-
-    private func generateNoise(count: Int, seed: UInt32) -> [Float] {
-        var rng = NumPyRandomSource(seed: seed)
-        return (0..<count).map { _ in Float(rng.nextNormal()) }
     }
 
     // MARK: - Image Conversion
@@ -796,195 +738,5 @@ public struct Flux2Pipeline: DiffusionPipeline {
             return Float(size - 1 - pos) / Float(overlap)
         }
         return 1.0
-    }
-}
-
-// MARK: - In-Context Edit (reference-conditioned instruction editing)
-//
-// STATUS: UNVALIDATED — written against the exported edit graph before it exists (weights
-// downloading). Compiles against the same-file private helpers; correctness must be confirmed
-// by a numeric parity check vs the diffusers Flux2 edit pipeline once `Transformer_edit.aimodel`
-// is exported. Do not ship until that passes.
-//
-// Mechanism (from diffusers `pipeline_flux2_klein`): the transformer attends over a single image
-// sequence built as [output latent tokens (T=0) ; reference image tokens (T=scale)]. Only the
-// output tokens are denoised — the reference tokens are re-supplied clean every step and their
-// predicted velocities are discarded. This is NOT SDEdit: the output starts from pure noise and
-// the reference steers via attention, so the instruction can add/replace/relight content while
-// keeping the subject. Same transformer graph as text-to-image, exported at the longer sequence.
-extension Flux2Pipeline {
-    /// Reference-conditioned instruction edit. `editTransformer` must be the edit-sequence graph
-    /// (`Transformer_edit` / `_512`), exported at (output tokens + one reference image's tokens).
-    /// The reference is encoded at the same grid as the output, so both blocks are `spatialSide`².
-    public func editImages(
-        referenceImage: CGImage,
-        instruction: String,
-        editTransformer: CoreAIDiffusionModelFunction,
-        stepCount: Int = 4,
-        seed: UInt32 = 0,
-        guidanceScale: Float = 1.0,
-        lazyModelLoading: Bool = true,
-        progressHandler: @Sendable (PipelineProgress) -> Bool = { _ in true }
-    ) async throws -> GenerationResult {
-        guard let encoder else {
-            throw NSError(domain: "Flux2Pipeline", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "edit requires a VAE encoder component"])
-        }
-
-        let imageSize = defaultImageSize.width
-        let spatialSide = imageSize / Self.patchSize
-        let inChannels = Self.latentChannels
-        let outSeq = spatialSide * spatialSide          // output (denoised) tokens, T = 0
-        let refSeq = spatialSide * spatialSide          // one reference image, T = refTScale
-        let refTScale = 10                              // matches diffusers _prepare_image_ids scale
-
-        // 1. Instruction text embeddings.
-        let textEmbeddings = try await encodeText(instruction)
-        let hDim = hiddenDim(textEmbeddings)
-
-        // 2. Reference image → clean latent tokens (encode → scale → patchify → BN → pack). No noise.
-        try await encoder.loadResources()
-        let refPacked = try await encodeReferenceLatents(
-            encoder: encoder, image: referenceImage,
-            imageSize: imageSize, spatialSide: spatialSide, inChannels: inChannels)
-        if lazyModelLoading { await encoder.unloadResources() }
-
-        // 3. Output latents = pure noise (T = 0).
-        let noise = generateNoise(count: inChannels * spatialSide * spatialSide, seed: seed)
-        var outputPacked = packLatentsSpatialFlatten(
-            noise, channels: inChannels, height: spatialSide, width: spatialSide)
-
-        // 4. Scheduler over the OUTPUT sequence (full-noise start: sigmaMax = 1.0, not SDEdit).
-        let mu = Self.schedulerBaseShift
-            + (Self.schedulerMaxShift - Self.schedulerBaseShift)
-            * (Float(outSeq) - Self.schedulerBaseSeqLen)
-            / (Self.schedulerMaxSeqLen - Self.schedulerBaseSeqLen)
-        let scheduler = DiscreteFlowScheduler(
-            stepCount: stepCount, trainStepCount: 1000, timeStepShift: 1.0, mu: mu, sigmaMax: 1.0)
-
-        // 5. RoPE over [text ; output(T=0) ; reference(T=refTScale)].
-        let axesDims = descriptor.ropeAxesDims ?? [32, 32, 32, 32]
-        let theta = descriptor.ropeTheta ?? Self.defaultRopeTheta
-        let (rotaryCos, rotarySin) = computeEditRotaryEmbeddings(
-            outGrid: spatialSide, refGrid: spatialSide, refTScale: refTScale,
-            textSeqLen: Self.textSeqLen, axesDims: axesDims, theta: theta)
-        let totalSeqLen = Self.textSeqLen + outSeq + refSeq
-        let totalDim = axesDims.reduce(0, +)
-        let ropeShape = [totalSeqLen, totalDim]
-
-        try await editTransformer.loadResources()
-
-        // 6. Denoise the output; reference tokens re-supplied clean each step, their predictions dropped.
-        for (step, t) in scheduler.timeSteps.enumerated() {
-            let timestepValue = Float(t) / 1000.0
-            let concat = outputPacked + refPacked   // [1, outSeq + refSeq, inChannels]
-
-            let output = try await editTransformer.run(floatInputs: [
-                (concat, [1, outSeq + refSeq, inChannels]),
-                (textEmbeddings, [1, Self.textSeqLen, hDim]),
-                ([timestepValue], [1]),
-                ([guidanceScale], [1]),
-                (rotaryCos, ropeShape),
-                (rotarySin, ropeShape),
-            ])
-
-            // Wrapper returns image tokens only (text stripped); keep the output block, step it.
-            let outputPred = Array(output[0 ..< outSeq * inChannels])
-            outputPacked = scheduler.step(output: outputPred, timeStep: t, sample: outputPacked)
-
-            if !progressHandler(PipelineProgress(step: step + 1, totalSteps: stepCount, currentLatent: nil)) {
-                break
-            }
-        }
-        if lazyModelLoading { await editTransformer.unloadResources() }
-
-        // 7. Decode the output latents.
-        var spatial = unpackLatentsSpatialFlatten(
-            outputPacked, channels: inChannels, height: spatialSide, width: spatialSide)
-        spatial = applyBatchNormDenorm(
-            spatial, channels: inChannels, height: spatialSide, width: spatialSide)
-        let unpatchified = Self.unpatchifyLatents(
-            spatial, channels: inChannels, height: spatialSide, width: spatialSide)
-
-        let vaeChannels = inChannels / 4
-        let vaeShape = [1, vaeChannels, spatialSide * 2, spatialSide * 2]
-        try await decoder.loadResources()
-        let pixels = try await decoder.run(floatInputs: [(unpatchified, vaeShape)])
-        if lazyModelLoading { await decoder.unloadResources() }
-
-        let image = try DiffusionUtilities.pixelsToCGImage(pixels, height: imageSize, width: imageSize)
-        return GenerationResult(images: [image], latents: [])
-    }
-
-    /// Reference image → clean packed latent tokens (the img2img encode, minus the noise blend).
-    private func encodeReferenceLatents(
-        encoder: CoreAIDiffusionModelFunction, image: CGImage,
-        imageSize: Int, spatialSide: Int, inChannels: Int
-    ) async throws -> [Float] {
-        let resized = CGImageUtils.resize(image, to: imageSize) ?? image
-        let pixels = try CGImageUtils.toNormalizedPlanarRGB(resized)
-        let encoded = try await encoder.run(floatInputs: [(pixels, [1, 3, imageSize, imageSize])])
-        let scaled = encoded.map { $0 * (descriptor.encoderScaleFactor ?? 0.18215) }
-        let patchified = Self.patchifyLatents(
-            scaled, inChannels: inChannels, height: spatialSide, width: spatialSide)
-        let normalized = applyBatchNormNorm(
-            patchified, channels: inChannels, height: spatialSide, width: spatialSide)
-        return packLatentsSpatialFlatten(
-            normalized, channels: inChannels, height: spatialSide, width: spatialSide)
-    }
-
-    /// RoPE for the edit sequence [text ; output(T=0) ; reference(T=refTScale)]. Mirrors
-    /// `computeRotaryEmbeddings` with the added T (image-index) axis (column 0).
-    private func computeEditRotaryEmbeddings(
-        outGrid: Int, refGrid: Int, refTScale: Int,
-        textSeqLen: Int, axesDims: [Int], theta: Float
-    ) -> ([Float], [Float]) {
-        let outSeq = outGrid * outGrid
-        let refSeq = refGrid * refGrid
-        let totalSeqLen = textSeqLen + outSeq + refSeq
-        let totalDim = axesDims.reduce(0, +)
-        var cosScalars = [Float](repeating: 0, count: totalSeqLen * totalDim)
-        var sinScalars = [Float](repeating: 0, count: totalSeqLen * totalDim)
-
-        // (T, H, W, L) coordinate of token `s` in the [text ; output ; reference] sequence.
-        func coord(_ s: Int, axis: Int) -> Double {
-            if s < textSeqLen { return axis == 3 ? Double(s) : 0.0 }   // text: axis 3 = sequential
-            let img = s - textSeqLen
-            if img < outSeq {                                          // output block: T = 0
-                let h = img / outGrid, w = img % outGrid
-                switch axis { case 1: return Double(h); case 2: return Double(w); default: return 0.0 }
-            }
-            let r = img - outSeq                                       // reference block: T = refTScale
-            let h = r / refGrid, w = r % refGrid
-            switch axis {
-            case 0: return Double(refTScale)
-            case 1: return Double(h)
-            case 2: return Double(w)
-            default: return 0.0
-            }
-        }
-
-        var axisOffset = 0
-        for (axisIdx, axisDim) in axesDims.enumerated() {
-            let halfDim = axisDim / 2
-            var invFreq = [Double](repeating: 0, count: halfDim)
-            for k in 0..<halfDim {
-                invFreq[k] = 1.0 / pow(Double(theta), Double(2 * k) / Double(axisDim))
-            }
-            for s in 0..<totalSeqLen {
-                let pos = coord(s, axis: axisIdx)
-                let outBase = s * totalDim + axisOffset
-                for k in 0..<halfDim {
-                    let angle = pos * invFreq[k]
-                    let c = Float(cos(angle)), sn = Float(sin(angle))
-                    cosScalars[outBase + 2 * k] = c
-                    cosScalars[outBase + 2 * k + 1] = c
-                    sinScalars[outBase + 2 * k] = sn
-                    sinScalars[outBase + 2 * k + 1] = sn
-                }
-            }
-            axisOffset += axisDim
-        }
-        return (cosScalars, sinScalars)
     }
 }

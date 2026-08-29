@@ -28,7 +28,7 @@ import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import numpy as np
 import pytest
@@ -825,6 +825,7 @@ class ForCausalLMTestBase:
     _test_weights_tying: bool = False
     _test_kv_cache: bool = True
     _test_weight_activation_quantization: bool = False
+    _test_eager_activation_quantization: bool = True
 
     @pytest.fixture(autouse=True)
     def _skip_if_hf_unreachable(self) -> None:
@@ -943,34 +944,38 @@ class ForCausalLMTestBase:
         assert lm_head_node is not None
         assert len(lm_head_node.users) == 2
 
+    @pytest.mark.parametrize("quantization_mode", ["eager", "graph"])
     @pytest.mark.parametrize("activation_quantization", [True, False])
     @pytest.mark.usefixtures("disable_hf_impl_for_coreai")
-    def test_weight_activation_quantization(self, activation_quantization) -> None:
+    def test_weight_activation_quantization(
+        self, activation_quantization: bool, quantization_mode: Literal["eager", "graph"]
+    ) -> None:
         """
         Test that weight and weight + activation quantization produces a mlirb model
-        through Core AI export.
+        through Core AI export, in both eager- and graph-mode quantization.
         Only runs if _test_weight_activation_quantization is True for the test class.
         """
         if not self._test_weight_activation_quantization:
             pytest.skip("Weight/Activation Quantization test not enabled for this model")
 
-        if activation_quantization:
-            pytest.skip("Activation quantization temporarily disabled with eager mode quantization")
+        if (
+            quantization_mode == "eager"
+            and activation_quantization
+            and not self._test_eager_activation_quantization
+        ):
+            pytest.skip("Eager-mode activation quantization test not enabled for this model")
 
-        # We replicate the relevant parts of
-        # ``coreai_models.export.pipeline._async_export_model`` here:
-        # load HF -> apply torch quantization -> run macOS export. The output
-        # asset write is intentionally skipped; we only want to confirm
+        # Same building blocks as `_async_export_model`: load HF ->
+        # `quantize_for_export` -> `export_macos_model`. Calling those rather than
+        # reimplementing the calibration trace keeps this from drifting from
+        # production, as it had. The asset write is skipped; we only confirm
         # quantize + export produces a non-None AIProgram.
-        from coreai_models.export._constants import (
-            QUANT_TRACE_OFFSET,
-            QUANT_TRACE_QUERY_LEN,
-            TRACE_KV_CACHE_SEQ_LEN,
-        )
-        from coreai_models.export.compression import quantize_pytorch_model
+        from coreai_models.export.compression import quantize_for_export
+        from coreai_models.export.externalize import patch_model_for_externalization
         from coreai_models.export.macos import export_macos_model
         from coreai_models.export.pipeline import ExportConfig
-        from coreai_models.primitives.macos.cache import KVCache
+
+        graph_mode = quantization_mode == "graph"
 
         hf_config = transformers.AutoConfig.from_pretrained(self._toy_model_id)
         is_gemma = "gemma" in self._model_class.__name__.lower()
@@ -1013,8 +1018,14 @@ class ForCausalLMTestBase:
                 "coreai_models.primitives.macos.rope.RoPE": None,
                 rms_norm_cls: None,
             },
-            "execution_mode": "eager",
+            "execution_mode": quantization_mode,
+            "calibrate_activations": activation_quantization,
         }
+
+        def calibration_data_fn() -> list[torch.Tensor]:
+            return [
+                torch.randint(1, hf_config.vocab_size, (1, 16), dtype=torch.int32) for _ in range(2)
+            ]
 
         max_context_length = 4096
         target_dtype = torch.float16
@@ -1034,49 +1045,34 @@ class ForCausalLMTestBase:
                 hf_state_dict_prefix=hf_state_dict_prefix,
             ).eval()
 
-            # Build calibration / trace inputs for quantization
-            vocab_size = getattr(hf_config, "vocab_size", 32000)
-            input_ids = torch.randint(1, vocab_size, (1, QUANT_TRACE_QUERY_LEN), dtype=torch.int32)
-            position_ids = (
-                torch.arange(QUANT_TRACE_QUERY_LEN + QUANT_TRACE_OFFSET, dtype=torch.int32)
-                .unsqueeze(0)
-                .expand(1, QUANT_TRACE_QUERY_LEN + QUANT_TRACE_OFFSET)
-            )
-            saved_max_pos = hf_config.max_position_embeddings
-            hf_config.max_position_embeddings = TRACE_KV_CACHE_SEQ_LEN
-            k_cache, v_cache = KVCache.create_cache_tensors(hf_config, dtype=target_dtype)
-            hf_config.max_position_embeddings = saved_max_pos
+            quantizer_mmap_dir: str | None = None
+            # coreai-opt only supports mmap-backed finalization in eager mode
+            if not graph_mode:
+                quantizer_mmap_dir = f"{tmpdir}/quantized"
+                os.makedirs(quantizer_mmap_dir, exist_ok=True)
 
-            quantization_inputs = (input_ids, position_ids, k_cache, v_cache)
-            quantization_dynamic_shapes = {
-                "input_ids": {1: torch.export.Dim("seq_ids", max=max_context_length - 2)},
-                "position_ids": {
-                    1: torch.export.Dim(
-                        "seq_pos",
-                        min=QUANT_TRACE_QUERY_LEN,
-                        max=max_context_length - 1,
-                    )
-                },
-                "k_cache": None,
-                "v_cache": None,
-            }
+            externalized_model = None
+            if graph_mode:
+                patch_model_for_externalization(model)
+                externalized_model = model
 
-            quantizer_mmap_dir = f"{tmpdir}/quantized"
-            os.makedirs(quantizer_mmap_dir, exist_ok=True)
-            model = quantize_pytorch_model(
+            model = quantize_for_export(
                 model,
-                quantization_inputs,
-                quantization_dynamic_shapes,
+                hf_config,
+                target_dtype,
                 dict(torch_quantization_config),
-                calibration_data_fn=None,
+                calibration_data_fn=calibration_data_fn if activation_quantization else None,
                 mmap_dir=quantizer_mmap_dir,
             )
 
             export_config = ExportConfig(
                 hf_model_id=self._toy_model_id,
                 max_context_length=max_context_length,
+                quantization_mode=quantization_mode,
             )
-            coreai_program = export_macos_model(model, hf_config, export_config)
+            coreai_program = export_macos_model(
+                model, hf_config, export_config, externalized_model=externalized_model
+            )
 
             assert coreai_program is not None, "export_macos_model returned None, conversion failed"
 

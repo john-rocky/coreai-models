@@ -24,6 +24,12 @@ let package = Package(
             ]
         ),
         .library(
+            name: "CoreAIVideoDiffusion",
+            targets: [
+                "CoreAIVideoDiffusionPipeline"
+            ]
+        ),
+        .library(
             name: "CoreAISegmentation",
             targets: [
                 "CoreAIImageSegmenter"
@@ -51,10 +57,8 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.2.0"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.1.0"),
-        // exact 0.2.2 == the revision main was pinned at (4d145cc) — pinned as a stable
-        // version so this package itself can be consumed by version tag (SPM forbids
-        // stable->branch dependency edges).
         .package(url: "https://github.com/mlc-ai/xgrammar", exact: "0.2.2"),
+        .package(url: "https://github.com/hummingbird-project/hummingbird", exact: "2.22.0"),
     ],
     targets: [
         .target(
@@ -127,6 +131,29 @@ let package = Package(
             ]
         ),
 
+        .target(
+            name: "CoreAIVideoDiffusionPipeline",
+            dependencies: [
+                "CoreAIDiffusionPipeline",
+                "CoreAIShared",
+                .product(name: "Transformers", package: "swift-transformers"),
+            ],
+            path: "swift/Sources/CoreAIVideoDiffusionPipeline",
+            swiftSettings: [
+                .enableUpcomingFeature("MemberImportVisibility")
+            ]
+        ),
+
+        // Shared types for LLM CLI tools (used by both llm-runner and llm-server)
+        .target(
+            name: "CoreAILMCommon",
+            dependencies: [],
+            path: "swift/Sources/CoreAILMCommon",
+            swiftSettings: [
+                .enableUpcomingFeature("MemberImportVisibility")
+            ]
+        ),
+
         // CXGrammar C bridge
         .target(
             name: "CXGrammar",
@@ -147,6 +174,20 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "swift/Sources/Tools/llm-runner",
+            swiftSettings: [
+                .enableUpcomingFeature("MemberImportVisibility")
+            ]
+        ),
+        .executableTarget(
+            name: "llm-server",
+            dependencies: [
+                "CoreAILanguageModels",
+                "CoreAILMCommon",
+                "CoreAIShared",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Hummingbird", package: "hummingbird"),
+            ],
+            path: "swift/Sources/Tools/llm-server",
             swiftSettings: [
                 .enableUpcomingFeature("MemberImportVisibility")
             ]
@@ -195,6 +236,18 @@ let package = Package(
                 "CoreAIShared"
             ],
             path: "swift/Sources/Tools/diffusion-lm-gate",
+            swiftSettings: [
+                .enableUpcomingFeature("MemberImportVisibility")
+            ]
+        ),
+        .executableTarget(
+            name: "videodiffusion-runner",
+            dependencies: [
+                "CoreAIVideoDiffusionPipeline",
+                "CoreAIShared",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            path: "swift/Sources/Tools/videodiffusion-runner",
             swiftSettings: [
                 .enableUpcomingFeature("MemberImportVisibility")
             ]
@@ -251,7 +304,7 @@ let package = Package(
                 .copy("Resources/diffusion_sampler_fixture.json"),
             ],
             swiftSettings: [
-                .enableExperimentalFeature("Lifetimes"),
+                .enableExperimentalFeature("Lifetimes")
             ],
             linkerSettings: [
                 .linkedLibrary("c++")
@@ -269,6 +322,7 @@ let package = Package(
             name: "DiffusionPipelineTests",
             dependencies: [
                 "CoreAIDiffusionPipeline",
+                "CoreAIVideoDiffusionPipeline",
                 "TestUtilities",
             ],
             path: "swift/Tests/DiffusionPipelineTests"
@@ -282,6 +336,11 @@ let package = Package(
             name: "CoreAISharedTests",
             dependencies: ["CoreAIShared", "TestUtilities"],
             path: "swift/Tests/CoreAISharedTests"
+        ),
+        .testTarget(
+            name: "CoreAILMCommonTests",
+            dependencies: ["CoreAILMCommon"],
+            path: "swift/Tests/CoreAILMCommonTests"
         ),
         .testTarget(
             name: "GuidedGenerationTests",

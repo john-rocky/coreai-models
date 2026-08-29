@@ -86,6 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--quantization-mode",
+        choices=["eager", "graph"],
+        default=None,
+        help="Override the coreai-opt execution mode for pre-export torch quantization "
+        "(macOS only). Defaults to whatever the compression preset or YAML sets. "
+        "'graph' externalizes composite ops and disables mmap-backed finalization.",
+    )
+    parser.add_argument(
         "--max-context-length",
         type=int,
         default=None,
@@ -143,6 +151,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--experimental",
         action="store_true",
         help="Allow exporting models without a registry preset. Requires --compute-precision.",
+    )
+    parser.add_argument(
+        "--include-debug-info",
+        action="store_true",
+        help=(
+            "Embed debug information in the exported .aimodel for debugging a conversion. "
+            "Default: off, which embeds minimum debug information and makes the "
+            "exported asset smaller."
+        ),
     )
     parser.add_argument(
         "--disable-embedding-quantization-ios",
@@ -328,6 +345,9 @@ def _resolve_export_config(args: argparse.Namespace) -> ExportConfig:
             f"--disable-embedding-quantization-ios requires --platform iOS (got '{variant}')."
         )
 
+    if args.quantization_mode == "graph" and variant != "macOS":
+        raise SystemExit(f"--quantization-mode graph requires --platform macOS (got '{variant}').")
+
     if args.compression_config is not None:
         if not args.compression_config.is_file():
             raise SystemExit(f"--compression-config: file not found: {args.compression_config}")
@@ -363,8 +383,10 @@ def _resolve_export_config(args: argparse.Namespace) -> ExportConfig:
         output_name=args.output_name,
         num_layers=args.num_layers,
         overwrite=args.overwrite,
+        quantization_mode=args.quantization_mode,
         compression_config_object=compression_config_object,
         disable_embedding_quantization=args.disable_embedding_quantization_ios,
+        include_debug_info=args.include_debug_info,
     )
 
 
@@ -419,6 +441,8 @@ def main() -> None:
         print(f"  model:              {config.hf_model_id}")
         print(f"  platform:           {config.variant}")
         print(f"  compression:        {config.compression}")
+        if config.quantization_mode is not None:
+            print(f"  quantization_mode:  {config.quantization_mode}")
         print(f"  compute_precision:  {config.compute_precision}")
         if config.max_context_length:
             print(f"  max_context_length: {config.max_context_length}")
@@ -428,6 +452,7 @@ def main() -> None:
         if config.num_layers:
             print(f"  num_layers:         {config.num_layers}")
         print(f"  overwrite:          {config.overwrite}")
+        print(f"  include_debug_info: {config.include_debug_info}")
         if config.variant == "iOS":
             print(f"  disable_embedding_quantization: {config.disable_embedding_quantization}")
         return

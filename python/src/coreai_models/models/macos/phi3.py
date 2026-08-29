@@ -1,20 +1,11 @@
-# Phi-3 / Phi-4-mini (`Phi3ForCausalLM`) text decoder for the Core AI path.
+# Copyright 2026 Apple Inc.
 #
-# Community port — NOT an Apple model.  A standard pre-norm dense GQA decoder
-# with two Phi-isms, both already in the HF checkpoint layout (so no state-dict
-# fusion is needed):
-#   * **Fused QKV** — `qkv_proj` packs [all-q | all-k | all-v] (bias-free).
-#   * **Fused gate/up MLP** — `gate_up_proj` packs [gate | up]; the block is
-#     `down(up * silu(gate))`.
-# Phi-4-mini additionally uses **partial rotary** (`partial_rotary_factor=0.75`
-# → only the first 96 of 128 head dims are rotated) and **LongRoPE** frequency
-# rescaling; both are handled by `LongRoPE` (short-factor regime).
+# Use of this source code is governed by a BSD-3-clause license that can
+# be found in the LICENSE file or at https://opensource.org/licenses/BSD-3-Clause
 
 import torch
 import torch.nn as nn
-from transformers.models.phi3.modeling_phi3 import (
-    Phi3Config,
-)
+from transformers.models.phi3.configuration_phi3 import Phi3Config
 from transformers.models.phi3.modeling_phi3 import (
     Phi3ForCausalLM as HFPhi3ForCausalLM,
 )
@@ -24,57 +15,8 @@ from coreai_models._hf import resolve_rope_theta
 from coreai_models.models.base import BaseForCausalLM
 from coreai_models.primitives.macos.cache import KVCache
 from coreai_models.primitives.macos.rms_norm import RMSNorm
-from coreai_models.primitives.macos.rope import (
-    LongRoPE,
-    compute_longrope_attention_scaling,
-    initialize_rope,
-)
+from coreai_models.primitives.macos.rope import initialize_rope
 from coreai_models.primitives.macos.sdpa import SDPA
-
-
-def _rotary_dim(config: Phi3Config, head_dim: int) -> int:
-    return int(head_dim * getattr(config, "partial_rotary_factor", 1.0))
-
-
-def _make_phi3_rope(config: Phi3Config, head_dim: int) -> nn.Module:
-    base = resolve_rope_theta(config)
-    rotary_dim = _rotary_dim(config, head_dim)
-    scaling = getattr(config, "rope_scaling", None)
-    rope_type = None
-    if isinstance(scaling, dict):
-        rope_type = scaling.get("rope_type") or scaling.get("type")
-    if isinstance(scaling, dict) and rope_type == "longrope":
-        original_max = (
-            getattr(config, "original_max_position_embeddings", None)
-            or config.max_position_embeddings
-        )
-        # `attention_scaling` is a fixed model property derived from the DESIGNED
-        # context (e.g. 131072), not the export-capped KV context. `_get_reauthored_config`
-        # stashes the designed max before capping so a 4096-context ANE export
-        # still gets the correct factor.
-        designed_max = getattr(config, "_longrope_designed_max", config.max_position_embeddings)
-        attention_scaling = compute_longrope_attention_scaling(designed_max, original_max)
-        return LongRoPE(
-            head_dim,
-            rotary_dim,
-            base,
-            scaling["short_factor"],
-            attention_scaling=attention_scaling,
-        )
-    # Plain Phi-3 (no longrope): default RoPE, partial if rotary_dim < head_dim.
-    return initialize_rope(dims=(rotary_dim if rotary_dim < head_dim else None), base=base)
-
-
-class Phi3MLP(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int) -> None:
-        super().__init__()
-        self.gate_up_proj = nn.Linear(dim, 2 * hidden_dim, bias=False)
-        self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        up_states = self.gate_up_proj(x)
-        gate, up_states = up_states.chunk(2, dim=-1)
-        return self.down_proj(up_states * nn.functional.silu(gate))
 
 
 class Attention(nn.Module):
@@ -87,16 +29,43 @@ class Attention(nn.Module):
         self.n_kv_heads = n_kv_heads = config.num_key_value_heads
         self.head_dim = head_dim = getattr(config, "head_dim", None) or dim // n_heads
 
-        # Phi packs qkv (and gate/up) — bias-free; matches HF key names directly.
-        self.qkv_proj = nn.Linear(
-            dim,
-            n_heads * head_dim + n_kv_heads * head_dim + n_kv_heads * head_dim,
-            bias=False,
-        )
+        # Use separate projections for GQA (n_heads != n_kv_heads) to work around
+        # a CoreAI MLIR narrow lowering bug (rdar://184090277). MHA uses fused QKV.
+        self.use_separate_qkv = n_heads != n_kv_heads
+        if self.use_separate_qkv:
+            self.q_proj = nn.Linear(dim, n_heads * head_dim, bias=False)
+            self.k_proj = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
+            self.v_proj = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
+        else:
+            self.qkv_proj = nn.Linear(
+                dim,
+                n_heads * head_dim + n_kv_heads * head_dim + n_kv_heads * head_dim,
+                bias=False,
+            )
         self.o_proj = nn.Linear(n_heads * head_dim, dim, bias=False)
 
-        self.sdpa = SDPA(is_causal=True)
-        self.rope = _make_phi3_rope(config, head_dim)
+        sliding_window = getattr(config, "sliding_window", None)
+        max_pos = getattr(config, "max_position_embeddings", None)
+        if sliding_window and max_pos and sliding_window < max_pos:
+            self.sdpa = SDPA(is_causal=True, scale=head_dim**-0.5, window_size=sliding_window)
+        else:
+            self.sdpa = SDPA(is_causal=True, scale=head_dim**-0.5)
+
+        partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
+        rope_dims = int(head_dim * partial_rotary_factor)
+        rope_theta = resolve_rope_theta(config)
+        assert rope_theta is not None, "Phi models require rope_theta in config"
+        rope_scaling = getattr(config, "rope_scaling", None)
+        original_max_pos = getattr(config, "original_max_position_embeddings", None)
+        native_max_pos = getattr(config, "_native_max_position_embeddings", max_pos)
+        self.rope = initialize_rope(
+            dims=rope_dims,
+            base=rope_theta,
+            scaling_config=rope_scaling,
+            max_position_embeddings=max_pos or original_max_pos,
+            original_max_position_embeddings=original_max_pos,
+            config_max_position_embeddings=native_max_pos,
+        )
 
     def forward(
         self,
@@ -107,14 +76,6 @@ class Attention(nn.Module):
         batch_size, query_len, _ = x.shape
         n_heads, n_kv_heads = self.n_heads, self.n_kv_heads
 
-        qkv = (
-            self.qkv_proj(x)
-            .reshape(batch_size, query_len, n_heads + 2 * n_kv_heads, self.head_dim)
-            .permute(0, 2, 1, 3)
-        )
-        query_key = qkv.narrow(1, 0, n_heads + n_kv_heads)
-        value = qkv.narrow(1, n_heads + n_kv_heads, n_kv_heads)
-
         seq_len = position_ids.shape[-1]
         torch._check_is_size(query_len)
         torch._check_is_size(seq_len)
@@ -122,9 +83,35 @@ class Attention(nn.Module):
         torch._check_is_size(offset)
         rope_positions = position_ids.narrow(-1, offset, query_len)
 
-        query_key = self.rope(query_key, position_ids=rope_positions)
-        query = query_key.narrow(1, 0, n_heads)
-        key = query_key.narrow(1, n_heads, n_kv_heads)
+        if self.use_separate_qkv:
+            query = (
+                self.q_proj(x)
+                .reshape(batch_size, query_len, n_heads, self.head_dim)
+                .permute(0, 2, 1, 3)
+            )
+            key = (
+                self.k_proj(x)
+                .reshape(batch_size, query_len, n_kv_heads, self.head_dim)
+                .permute(0, 2, 1, 3)
+            )
+            value = (
+                self.v_proj(x)
+                .reshape(batch_size, query_len, n_kv_heads, self.head_dim)
+                .permute(0, 2, 1, 3)
+            )
+            query = self.rope(query, position_ids=rope_positions)
+            key = self.rope(key, position_ids=rope_positions)
+        else:
+            qkv = (
+                self.qkv_proj(x)
+                .reshape(batch_size, query_len, n_heads + 2 * n_kv_heads, self.head_dim)
+                .permute(0, 2, 1, 3)
+            )
+            query_key = qkv.narrow(1, 0, n_heads + n_kv_heads)
+            query_key = self.rope(query_key, position_ids=rope_positions)
+            query = query_key.narrow(1, 0, n_heads)
+            key = query_key.narrow(1, n_heads, n_kv_heads)
+            value = qkv.narrow(1, n_heads + n_kv_heads, n_kv_heads)
 
         if cache is not None:
             key, value = cache.update_and_fetch(
@@ -139,12 +126,24 @@ class Attention(nn.Module):
         return self.o_proj(output)
 
 
+class FusedGateUpMLP(nn.Module):
+    def __init__(self, dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.gate_up_proj = nn.Linear(dim, 2 * hidden_dim, bias=False)
+        self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate_up = self.gate_up_proj(x)
+        gate, up = gate_up.chunk(2, dim=-1)
+        return self.down_proj(nn.functional.silu(gate) * up)
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, config: Phi3Config, layer_idx: int) -> None:
         super().__init__()
         hidden_size = config.hidden_size
         self.self_attn = Attention(config, layer_idx=layer_idx)
-        self.mlp = Phi3MLP(hidden_size, config.intermediate_size)
+        self.mlp = FusedGateUpMLP(hidden_size, config.intermediate_size)
 
         self.input_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)
@@ -187,13 +186,13 @@ class Phi3ForCausalLM(BaseForCausalLM):
     _HF_MODEL_CLASS = HFPhi3ForCausalLM
 
     @classmethod
+    @override
     def _get_reauthored_config(cls, hf_config, max_context_length=None, num_layers=None):
-        # Stash the DESIGNED context length before it is capped to the export
-        # KV context, so longrope attention scaling is computed from the model's
-        # true ratio (e.g. 131072/4096) rather than the capped one.
-        if not hasattr(hf_config, "_longrope_designed_max"):
-            hf_config._longrope_designed_max = hf_config.max_position_embeddings
-        return super()._get_reauthored_config(hf_config, max_context_length, num_layers=num_layers)
+        # Preserve the native max_position_embeddings before clamping so that
+        # LongRoPE can compute attention_factor from the model's full context ratio.
+        if max_context_length is not None and hasattr(hf_config, "max_position_embeddings"):
+            hf_config._native_max_position_embeddings = hf_config.max_position_embeddings
+        return super()._get_reauthored_config(hf_config, max_context_length, num_layers)
 
     @override
     def _init_model(self, config: Phi3Config) -> None:
@@ -216,9 +215,23 @@ class Phi3ForCausalLM(BaseForCausalLM):
 
     @override
     def _mutate_state_dict(self: Self, state_dict: dict[str, torch.Tensor]) -> None:
-        # No fusion: HF Phi-3 already ships fused qkv_proj / gate_up_proj and the
-        # reauthored module names mirror the HF keys 1:1.
-        return
+        is_gqa = self.config.num_attention_heads != self.config.num_key_value_heads
+        if is_gqa:
+            n_heads = self.config.num_attention_heads
+            n_kv_heads = self.config.num_key_value_heads
+            head_dim = getattr(self.config, "head_dim", None) or (
+                self.config.hidden_size // n_heads
+            )
+            q_size = n_heads * head_dim
+            k_size = n_kv_heads * head_dim
+            v_size = n_kv_heads * head_dim
+            for key in [k for k in list(state_dict.keys()) if "qkv_proj.weight" in k]:
+                qkv_weight = state_dict.pop(key)
+                prefix = key.replace("qkv_proj.weight", "")
+                q, k, v = qkv_weight.split([q_size, k_size, v_size], dim=0)
+                state_dict[prefix + "q_proj.weight"] = q
+                state_dict[prefix + "k_proj.weight"] = k
+                state_dict[prefix + "v_proj.weight"] = v
 
     def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
         super().load_state_dict(state_dict, strict=strict, assign=assign)
