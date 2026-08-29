@@ -228,18 +228,6 @@ let package = Package(
                 .enableUpcomingFeature("MemberImportVisibility")
             ]
         ),
-        // DiffusionGemma P4 engine forward gate (real engine path: PreparedModel ->
-        // GPU + expectFrequentReshapes, which Python rt.AIModel.load cannot set).
-        .executableTarget(
-            name: "diffusion-lm-gate",
-            dependencies: [
-                "CoreAIShared"
-            ],
-            path: "swift/Sources/Tools/diffusion-lm-gate",
-            swiftSettings: [
-                .enableUpcomingFeature("MemberImportVisibility")
-            ]
-        ),
         .executableTarget(
             name: "videodiffusion-runner",
             dependencies: [
@@ -301,7 +289,6 @@ let package = Package(
             path: "swift/Tests/LanguageModelsTests",
             resources: [
                 .copy("Resources/MinimalTokenizer"),
-                .copy("Resources/diffusion_sampler_fixture.json"),
             ],
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes")
