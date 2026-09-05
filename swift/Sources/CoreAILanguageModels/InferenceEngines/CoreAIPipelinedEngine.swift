@@ -161,6 +161,10 @@ final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable
                     tokenContinuation.finish()
                 }
 
+                // The final sampled token is in history but has not been fed back
+                // through the model. Only processed tokens have reusable state.
+                self.history.truncate(to: self.engine.processedTokenCount)
+
                 // Implicit prefix caching: resolve input against history
                 var (commonPrefix, resolvedNewTokens) = self.history.resolve(input: input)
                 self.lastPrefixHitCount = commonPrefix
