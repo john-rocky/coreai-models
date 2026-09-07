@@ -45,6 +45,17 @@ _METADATA: dict[str, AIModelMetadataFields] = {
             "Source: https://huggingface.co/openbmb/MiniCPM5-1B"
         ),
     ),
+    "openbmb/MiniCPM5-2B": AIModelMetadataFields(
+        author="OpenBMB",
+        license="Apache-2.0",
+        model_description=(
+            "MiniCPM5-2B is a 2.5B-parameter on-device causal language model "
+            "from OpenBMB (dense LlamaForCausalLM, 42 layers), with hybrid "
+            "(Think / No-Think) reasoning, tool calling and 128K context, "
+            "reaching 2B-class open-source SOTA. "
+            "Source: https://huggingface.co/openbmb/MiniCPM5-2B"
+        ),
+    ),
     "Qwen/Qwen2.5-1.5B-Instruct": AIModelMetadataFields(
         author="Qwen Team",
         license="Apache-2.0",
