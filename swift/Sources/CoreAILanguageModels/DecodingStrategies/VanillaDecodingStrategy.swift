@@ -222,8 +222,15 @@ extension VanillaDecodingStrategy.VanillaDecodedSequence {
                     let matchedText = tokenizer.decode(tokens: matched.map(Int.init))
                     engineSequence?.setStopReason(.stopSequence(matchedText))
 
-                    // Drain remaining tokens so the pipelined engine's producer Task completes.
-                    while try await iterator.next() != nil {}
+                    // Stop the producer instead of draining it. The engines have no notion of
+                    // EOS: the pipelined loop runs to maxTokens unless its output stream is
+                    // terminated, so draining here made every turn pay for the whole response
+                    // budget after the answer had ended (a one-sentence reply followed by ~2000
+                    // tokens of dead decode, shown as "generating" until the user cancelled).
+                    // Releasing the sequence and its iterator terminates the stream, which flips
+                    // the pipelined loop's isCancelled at its next step; the sequential iterator
+                    // is pull-based and simply stops being pulled. The engine's next generate()
+                    // drains the in-flight step itself before touching the KV state.
                     engineSequence = nil
                     upstreamIterator = nil
 

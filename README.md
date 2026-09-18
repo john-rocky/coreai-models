@@ -7,7 +7,7 @@
 > project go to [`apple/coreai-models`](https://github.com/apple/coreai-models).
 >
 > **What this branch is.** Upstream `main` through #207 (2026-08-28) plus the zoo patches,
-> on branch `zoo-0.4` / tag `0.2.4-zoo`. Everything not listed below is byte-for-byte upstream.
+> on branch `zoo-0.4` / tag `0.2.5-zoo`. Everything not listed below is byte-for-byte upstream.
 >
 > - **Community model ports** under `python/src/coreai_models/models/` — files marked
 >   `Community port — NOT an Apple model` (ternary/1-bit, speech, OCR, MoE, MLA and hybrid
@@ -20,7 +20,12 @@
 > - **Export**: `build_macos_export_spec` / `export_core()` shims for the hybrid ports on top
 >   of upstream's export contract, plus multifunction export.
 >
-> **Tags.** Use `0.2.4-zoo` or later. `0.2.4-zoo` drops the fork's sampler drain, which upstream
+> **Tags.** Use `0.2.5-zoo` or later. `0.2.5-zoo` stops the engine at a stop sequence instead of
+> draining it to `maxTokens` (`VanillaDecodingStrategy`): before it, every chat turn on the
+> pipelined engine kept decoding for the whole remaining response budget after EOS — a 14-token
+> LFM2.5 1.2B answer with a 2048 cap took 8.3 s to complete on an M4 Max (0.4 s with a 64 cap),
+> 0.2 s after the fix at any cap; on a phone that was tens of seconds of "generating" after the
+> answer until the user cancelled. `0.2.4-zoo` drops the fork's sampler drain, which upstream
 > #121 made redundant — decode +43–52% on macOS (qwen3-0.6b, measured drain vs. none; iOS not yet
 > measured). `0.2.2-zoo` and earlier predate upstream #121 (the pipelined sampling fix) and
 > produce corrupted text at temperature > 0.
