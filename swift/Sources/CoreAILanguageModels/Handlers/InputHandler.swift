@@ -54,6 +54,7 @@ public struct InputContext: Sendable {
 /// The engine calls `prepare(...)` each step and passes the result to `function.run()`.
 /// Standard models use `TokenInputHandler`; models with extra inputs (RoPE,
 /// sliding step, PLE) wrap it with `CompositeInputHandler`.
+@available(macOS 27, iOS 27, *)
 public protocol SyncInputHandler {
     /// Input names this handler produces.
     var inputNames: [String] { get }
@@ -64,6 +65,7 @@ public protocol SyncInputHandler {
 
 // MARK: - Load-time Coverage Check
 
+@available(macOS 27, iOS 27, *)
 public enum InputCoverage {
     /// Verify that a set of handlers covers all required inputs declared by the model descriptor.
     /// Call at engine init to fail fast on missing handlers rather than producing NaN at runtime.

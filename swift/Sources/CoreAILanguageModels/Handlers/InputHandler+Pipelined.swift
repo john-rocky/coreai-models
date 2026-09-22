@@ -14,6 +14,7 @@ import Metal
 ///
 /// `decodeOutputBuffers` is shared with the engine (GPU sampler writes next token
 /// there; this handler reads the previous step's token during decode).
+@available(macOS 27, iOS 27, *)
 struct PipelinedTokenInputHandler {
     let inputIdsName: String
     let positionIdsName: String

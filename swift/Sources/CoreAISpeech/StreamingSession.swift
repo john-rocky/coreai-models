@@ -78,6 +78,7 @@ package struct EndpointDetector {
 /// Lives inside the `SpeechRecognitionModel` actor so that `ParakeetTDTDecoder.Stream` and the
 /// encoder's `NDArray` outputs never cross an isolation boundary; `@unchecked Sendable` for the
 /// same reason as `Stream`.
+@available(macOS 27, iOS 27, *)
 package final class StreamingSessionState: @unchecked Sendable {
     package let config: StreamingConfig
     let endpointing: EndpointingConfig
@@ -138,6 +139,7 @@ package final class StreamingSessionState: @unchecked Sendable {
 
 // MARK: - Streaming API
 
+@available(macOS 27, iOS 27, *)
 extension SpeechRecognitionModel {
     /// Begin a live transcription session and return its update stream.
     ///

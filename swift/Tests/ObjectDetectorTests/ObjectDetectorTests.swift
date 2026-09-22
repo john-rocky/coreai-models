@@ -215,6 +215,7 @@ struct ObjectDetectorTests {
 
     // MARK: - Batch planning
 
+    @available(macOS 27, iOS 27, *)
     @Test("planBatch: single image, dynamic dims, no overrides → parameter defaults")
     func planBatchSingleDefault() throws {
         let p = DetectionParameters()
@@ -226,6 +227,7 @@ struct ObjectDetectorTests {
         #expect(plan == ObjectDetector.BatchPlan(batch: 1, height: p.inputHeight, width: p.inputWidth))
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("planBatch: multi-image, dynamic dims, no overrides → parameter defaults")
     func planBatchMultiDefault() throws {
         let p = DetectionParameters()
@@ -237,6 +239,7 @@ struct ObjectDetectorTests {
         #expect(plan == ObjectDetector.BatchPlan(batch: 3, height: p.inputHeight, width: p.inputWidth))
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("planBatch: multi-image, dynamic dims, explicit overrides win")
     func planBatchMultiOverride() throws {
         var params = DetectionParameters.default
@@ -250,6 +253,7 @@ struct ObjectDetectorTests {
         #expect(plan == ObjectDetector.BatchPlan(batch: 2, height: 512, width: 512))
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("planBatch: static spatial dims override parameter values silently")
     func planBatchStaticSpatialIgnoresParams() throws {
         // Static [1, 3, 800, 800] with mismatching params → planBatch uses
@@ -265,6 +269,7 @@ struct ObjectDetectorTests {
         #expect(plan == ObjectDetector.BatchPlan(batch: 1, height: 800, width: 800))
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("planBatch: static batch mismatch throws (multi-image into batch=1 model)")
     func planBatchStaticBatchMismatchThrows() {
         #expect(throws: DetectionRuntimeError.self) {

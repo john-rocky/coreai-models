@@ -13,6 +13,7 @@ import Foundation
 ///
 /// Orchestrates: text encode → denoise loop → VAE decode.
 /// All intermediate computation in [Float]. NDArray only at model I/O boundary.
+@available(macOS 27, iOS 27, *)
 public struct StableDiffusionPipeline: DiffusionPipeline {
     public let descriptor: PipelineDescriptor
     private let components: CoreAIDiffusionComponents

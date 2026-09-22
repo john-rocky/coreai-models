@@ -9,6 +9,7 @@ import Foundation
 
 /// Core AI diffusion model function — manages a single InferenceFunction
 /// for stateless model evaluation (text encoder, UNet, VAE).
+@available(macOS 27, iOS 27, *)
 public actor CoreAIDiffusionModelFunction {
     private let modelURL: URL
     private var model: AIModel?
@@ -344,6 +345,7 @@ public actor CoreAIDiffusionModelFunction {
 
 // MARK: - Errors
 
+@available(macOS 27, iOS 27, *)
 public enum CoreAIDiffusionError: Error, LocalizedError {
     case functionNotFound(String, URL)
     case notLoaded

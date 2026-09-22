@@ -17,6 +17,7 @@ import Testing
 /// Tests for KVCacheFactory utility methods - pure logic, no model required.
 @Suite("KVCacheFactory Utilities")
 struct KVCacheFactoryTests {
+    @available(macOS 27, iOS 27, *)
     @Test("detectSequenceDim returns 3 for 5D tensors")
     func detectSequenceDim5D() {
         // KV cache shape [L, B, H, S, D] (5D with layers) → seqDim = 3
@@ -24,6 +25,7 @@ struct KVCacheFactoryTests {
         #expect(KVCacheFactory.detectSequenceDim(shape: shape5D) == 3)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("detectSequenceDim returns 2 for 4D tensors")
     func detectSequenceDim4D() {
         // KV cache shape [B, H, S, D] (4D per-layer) → seqDim = 2
@@ -31,6 +33,7 @@ struct KVCacheFactoryTests {
         #expect(KVCacheFactory.detectSequenceDim(shape: shape4D) == 2)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("describeKVCacheStructure formats 5D correctly")
     func describe5DShape() {
         let shape = [32, 1, 8, 2048, 64]
@@ -42,6 +45,7 @@ struct KVCacheFactoryTests {
         #expect(desc.contains("64 head_dim"))
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("describeKVCacheStructure formats 4D correctly")
     func describe4DShape() {
         let shape = [1, 8, 512, 64]
@@ -52,6 +56,7 @@ struct KVCacheFactoryTests {
         #expect(desc.contains("head_dim=64"))
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("describeKVCacheStructure handles 2D and 3D")
     func describe2D3DShapes() {
         let shape2D = [16, 256]

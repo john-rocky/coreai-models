@@ -13,6 +13,7 @@ import ImageIO
 
 extension DecodeResolution: ExpressibleByArgument {}
 
+@available(macOS 27, iOS 27, *)
 @main
 struct DiffusionRunner: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

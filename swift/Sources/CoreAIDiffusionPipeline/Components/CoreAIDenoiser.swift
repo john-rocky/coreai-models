@@ -7,6 +7,7 @@ import CoreAI
 import Foundation
 
 /// Core AI denoiser — wraps a UNet or DiT/MMDiT model function.
+@available(macOS 27, iOS 27, *)
 public final class CoreAIDenoiser: Sendable {
     public let function: CoreAIDiffusionModelFunction
 

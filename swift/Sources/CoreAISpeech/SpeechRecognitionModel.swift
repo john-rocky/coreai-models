@@ -16,6 +16,7 @@ import Tokenizers
 /// encoder-decoder bundles and Parakeet TDT bundles; the architecture is
 /// auto-detected from the bundle's metadata.json (or the legacy
 /// encoder/decoder filename convention for Whisper).
+@available(macOS 27, iOS 27, *)
 public actor SpeechRecognitionModel {
     package let bundle: SpeechRecognitionBundle
     package let decoder: any SpeechDecoder

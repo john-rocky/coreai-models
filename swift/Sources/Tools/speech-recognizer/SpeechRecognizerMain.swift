@@ -12,6 +12,7 @@ import Tokenizers
 
 // MARK: - Entry point
 
+@available(macOS 27, iOS 27, *)
 @main
 struct SpeechRecognizer: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -217,6 +218,7 @@ struct SpeechRecognizer: AsyncParsableCommand {
 
 // MARK: - Split bundle via CoreAISpeech
 
+@available(macOS 27, iOS 27, *)
 func runBundle(
     bundleURL: URL, audioPath: String?, warmup: Bool, verbose: Bool, dumpMel: String? = nil,
     resetAfterSilenceFrames: Int? = nil
@@ -292,6 +294,7 @@ func runBundle(
 
 // MARK: - Legacy monolithic model
 
+@available(macOS 27, iOS 27, *)
 func runLegacy(model: String, audioPath: String?, warmup: Bool) async throws {
     print("Format: legacy (monolithic, no KV cache)")
 

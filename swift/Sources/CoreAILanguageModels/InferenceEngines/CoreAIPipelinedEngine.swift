@@ -42,6 +42,7 @@ private let minimumMPSNDArrayBufferSize = 64
 /// - Pipeline-depth-matched buffer rotation for CPU/GPU overlap
 /// - Growing KV cache with pipelined expansion
 /// - All tensors are owned MTLBuffers — Core AI never allocates/frees them
+@available(macOS 27, iOS 27, *)
 final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable, Sendable {
     typealias ConfigType = ModelConfig
 
@@ -411,6 +412,7 @@ final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable
 
 // MARK: - Constrained Session Cache
 
+@available(macOS 27, iOS 27, *)
 extension CoreAIPipelinedEngine {
     /// Check out a constrained session from the cache, or create a new one.
     /// The cache slot is emptied — concurrent calls get independent sessions.
@@ -537,6 +539,7 @@ final class PipelineGate: Sendable {
 /// `maxContextLength` per-step slots (slot index = token position, so in-flight prefill steps
 /// each read a distinct region and host writes never race the GPU), fills the step's slot via
 /// `EngineOptions.perTokenInputProvider`, and binds it as an additional input on every encode.
+@available(macOS 27, iOS 27, *)
 private struct PipelinedPerTokenInput {
     let name: String
     let buffer: MTLBuffer
@@ -554,6 +557,7 @@ private struct PipelinedPerTokenInput {
 /// supplied by `EngineOptions.staticInputBuffers`, is never written, and imposes no per-step
 /// host work — unlike per-token inputs there is no S=1 constraint and no decode-loop wait on
 /// the sampled token, so the full pipeline depth survives.
+@available(macOS 27, iOS 27, *)
 private struct PipelinedStaticInput {
     let name: String
     let buffer: MTLBuffer
@@ -610,6 +614,7 @@ final class TokenRendezvous: Sendable {
 
 // MARK: - Engine Implementation
 
+@available(macOS 27, iOS 27, *)
 private struct EngineImpl: ~Copyable {
     var vocabSize: Int { config.vocabSize }
 
@@ -2217,6 +2222,7 @@ private struct EngineImpl: ~Copyable {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 extension CoreAIPipelinedEngine {
     /// Async sequence of `InferenceOutput` produced by `generate()`.
     ///
@@ -2242,6 +2248,7 @@ extension CoreAIPipelinedEngine {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 extension CoreAIPipelinedEngine.GenerationSequence {
     public struct Iterator: AsyncIteratorProtocol {
         public typealias Element = InferenceOutput

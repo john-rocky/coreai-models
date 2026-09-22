@@ -61,6 +61,7 @@ extension FrameSamplingStrategy: ExpressibleByArgument {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 @main
 struct Main {
     static func main() async throws {
@@ -68,6 +69,7 @@ struct Main {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 struct LLMRunner: AsyncParsableCommand, Sendable {
     static let configuration = CommandConfiguration(
         commandName: "llm-runner",

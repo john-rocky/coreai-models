@@ -23,6 +23,7 @@ import Tokenizers
 /// "speech_recognizer"` and `config.architecture: "parakeet_tdt"`, an `assets`
 /// map for `encoder` / `decoder_step` / `joint`, and a TDT `config` block), the
 /// three `.aimodel` assets, and a `processor/` subdirectory carrying the tokenizer.
+@available(macOS 27, iOS 27, *)
 public struct SpeechRecognitionBundle: Sendable {
     public let kind: Kind
     public let tokenizer: (any Tokenizer)?

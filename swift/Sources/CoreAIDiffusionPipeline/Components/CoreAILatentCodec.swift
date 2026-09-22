@@ -9,6 +9,7 @@ import CoreGraphics
 import Foundation
 
 /// Core AI latent decoder — wraps a VAE decoder model function.
+@available(macOS 27, iOS 27, *)
 public final class CoreAILatentDecoder: Sendable {
     public let function: CoreAIDiffusionModelFunction
 
@@ -53,6 +54,7 @@ public final class CoreAILatentDecoder: Sendable {
 }
 
 /// Core AI latent encoder — wraps a VAE encoder model function (for img2img).
+@available(macOS 27, iOS 27, *)
 public final class CoreAILatentEncoder: Sendable {
     public let function: CoreAIDiffusionModelFunction
 

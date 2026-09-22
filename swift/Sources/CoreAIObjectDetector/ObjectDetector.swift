@@ -11,6 +11,7 @@ import Foundation
 // MARK: - ObjectDetector
 
 /// Core AI-backed object detector.
+@available(macOS 27, iOS 27, *)
 public struct ObjectDetector {
     private let function: InferenceFunction
     private let functionDescriptor: InferenceFunctionDescriptor

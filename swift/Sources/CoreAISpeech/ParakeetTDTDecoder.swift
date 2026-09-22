@@ -14,6 +14,7 @@ import Foundation
 /// hidden/cell state is owned here, seeded with zeros and only advanced when the
 /// step's input symbol is non-blank, matching the HF
 /// `ParakeetTDTDecoderCache.update(..., mask=~blank_mask)` semantics.
+@available(macOS 27, iOS 27, *)
 public struct ParakeetTDTDecoder: SpeechDecoder {
     /// The `decoder_step` graph plus the descriptors its buffers are built from.
     private struct StepGraph {

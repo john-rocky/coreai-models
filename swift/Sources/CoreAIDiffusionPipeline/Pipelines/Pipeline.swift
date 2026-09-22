@@ -8,6 +8,7 @@ import CoreAIShared
 import CoreGraphics
 
 /// Result from image generation — both displayable images and raw latents.
+@available(macOS 27, iOS 27, *)
 public struct GenerationResult: Sendable {
     /// Decoded images ready for display.
     public let images: [CGImage]
@@ -21,6 +22,7 @@ public struct GenerationResult: Sendable {
 }
 
 /// Progress callback payload for generation UI.
+@available(macOS 27, iOS 27, *)
 public struct PipelineProgress: Sendable {
     public let step: Int
     public let totalSteps: Int
@@ -35,6 +37,7 @@ public struct PipelineProgress: Sendable {
 }
 
 /// Orchestrates multi-component diffusion inference (text encode → denoise → decode).
+@available(macOS 27, iOS 27, *)
 public protocol DiffusionPipeline: ResourceManaging {
     /// Native output resolution for this model.
     var defaultImageSize: (width: Int, height: Int) { get }

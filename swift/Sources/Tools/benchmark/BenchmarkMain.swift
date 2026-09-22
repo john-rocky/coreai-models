@@ -12,6 +12,7 @@ import CoreAIShared
 import Foundation
 import Metal
 
+@available(macOS 27, iOS 27, *)
 @main
 struct Main {
     static func main() async throws {
@@ -19,6 +20,7 @@ struct Main {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 struct LLMBenchmark: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "llm-benchmark",

@@ -20,6 +20,7 @@ import Foundation
 ///     together at runtime. Produced by the SAM3 lite export. The engine pipes the encoder
 ///     outputs into the detector and returns the same `SegmentationOutput` shape as the
 ///     single-function path.
+@available(macOS 27, iOS 27, *)
 public struct CoreAISegmentationEngine {
     private let backend: Backend
 

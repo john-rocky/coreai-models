@@ -26,6 +26,7 @@ public enum GraphNames {
 /// - `dynamic`: Uses `CoreAISequentialEngine` or `CoreAIPipelinedEngine`
 /// - `multiFunctionSegmenter`: Uses `CoreAISegmentationEngine` against an asset
 ///   with `image_encode` / `text_encode` / `detect` graphs (e.g. optimized SAM3).
+@available(macOS 27, iOS 27, *)
 public enum ModelStructure: Equatable, Sendable, CustomStringConvertible {
     /// Chunked static model with fixed batch size for static-shape execution.
     /// Identified by presence of `extend_*` and `load_embeddings` functions.
@@ -97,6 +98,7 @@ public enum ModelStructure: Equatable, Sendable, CustomStringConvertible {
 /// ## Thread Safety
 /// `PreparedModelAsset` is `Sendable` and can be safely shared across actor boundaries.
 /// The underlying `AIModel` is thread-safe for read access.
+@available(macOS 27, iOS 27, *)
 public struct PreparedModel: Sendable {
     /// The pre-loaded and JIT-compiled model.
     public let model: AIModel

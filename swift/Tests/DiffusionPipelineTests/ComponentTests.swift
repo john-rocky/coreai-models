@@ -17,6 +17,7 @@ import Tokenizers
 struct ComponentTests {
     // MARK: - CoreAITextEncoder
 
+    @available(macOS 27, iOS 27, *)
     @Test("TextEncoder requires function to be loaded")
     func textEncoderRequiresLoad() async {
         let fn = CoreAIDiffusionModelFunction(
@@ -31,6 +32,7 @@ struct ComponentTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("TextEncoder truncates long token sequences")
     func textEncoderTruncates() async {
         let capturedIds = Mutex<[Int32]?>(nil)
@@ -53,6 +55,7 @@ struct ComponentTests {
 
     // MARK: - CoreAIDenoiser
 
+    @available(macOS 27, iOS 27, *)
     @Test("Denoiser requires function to be loaded")
     func denoiserRequiresLoad() async {
         let fn = CoreAIDiffusionModelFunction(
@@ -70,6 +73,7 @@ struct ComponentTests {
 
     // MARK: - CoreAILatentDecoder
 
+    @available(macOS 27, iOS 27, *)
     @Test("LatentDecoder requires function to be loaded")
     func decoderRequiresLoad() async {
         let fn = CoreAIDiffusionModelFunction(
@@ -102,6 +106,7 @@ struct ComponentTests {
 
     // MARK: - CoreAILatentEncoder
 
+    @available(macOS 27, iOS 27, *)
     @Test("LatentEncoder requires function to be loaded")
     func encoderRequiresLoad() async {
         let fn = CoreAIDiffusionModelFunction(
@@ -130,6 +135,7 @@ struct ComponentTests {
 
 // MARK: - Flux2 Pipeline Utilities
 
+@available(macOS 27, iOS 27, *)
 private func makeFlux2Pipeline(bnMean: [Float]? = nil, bnVar: [Float]? = nil) -> Flux2Pipeline {
     let stub = CoreAIDiffusionModelFunction(modelURL: URL(filePath: "/nonexistent.aimodel"))
     return Flux2Pipeline(

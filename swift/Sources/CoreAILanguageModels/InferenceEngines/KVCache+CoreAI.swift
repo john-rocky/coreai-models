@@ -13,6 +13,7 @@ import MetalPerformanceShaders
 
 /// Binding-ready tensor reference for Core AI inference.
 /// Stores the Metal buffer alongside its shape/strides for RawView construction.
+@available(macOS 27, iOS 27, *)
 struct TensorBinding {
     let metalBuffer: MTLBuffer
     private(set) var shape: [Int]
@@ -42,6 +43,7 @@ struct TensorBinding {
 ///
 /// Conforming types manage key and value cache buffers for transformer inference.
 /// The protocol supports both static (fixed-size) and dynamic (growing) strategies.
+@available(macOS 27, iOS 27, *)
 protocol CoreAIKVCache {
     /// Current allocated capacity (sequence length dimension).
     var currentCapacity: Int { get }
@@ -83,6 +85,7 @@ protocol CoreAIKVCache {
 // MARK: - CoreAIKVCache Factory
 
 /// Factory for creating KV cache instances based on strategy.
+@available(macOS 27, iOS 27, *)
 enum KVCacheFactory {
     /// Detect if the model supports dynamic KV cache sizing.
     ///
@@ -205,6 +208,7 @@ enum KVCacheFactory {
 /// - Memory is not a concern
 /// - Predictable allocation is required
 /// - Maximum throughput is needed (no growth stalls)
+@available(macOS 27, iOS 27, *)
 struct StaticKVCache: CoreAIKVCache {
     let currentCapacity: Int
 
@@ -310,6 +314,7 @@ struct StaticKVCache: CoreAIKVCache {
 /// - Memory efficiency is important
 /// - Most conversations are shorter than max context
 /// - Occasional stalls are acceptable
+@available(macOS 27, iOS 27, *)
 struct GrowingKVCache: CoreAIKVCache {
     private(set) var currentCapacity: Int
 
@@ -553,6 +558,7 @@ struct GrowingKVCache: CoreAIKVCache {
 
 // MARK: - ScalarType Extension
 
+@available(macOS 27, iOS 27, *)
 extension NDArray.ScalarType {
     /// Byte size for Core AI scalar types.
     var byteSize: Int {

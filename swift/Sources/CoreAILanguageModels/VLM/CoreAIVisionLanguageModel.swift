@@ -25,6 +25,7 @@ import Tokenizers
 ///     }
 /// }
 /// ```
+@available(macOS 27, iOS 27, *)
 public struct CoreAIVisionLanguageModel: LanguageModel {
     public typealias Executor = CoreAIVLMExecutor
 
@@ -87,6 +88,7 @@ public struct CoreAIVisionLanguageModel: LanguageModel {
 
 // MARK: - CoreAIVLMExecutor
 
+@available(macOS 27, iOS 27, *)
 public struct CoreAIVLMExecutor: LanguageModelExecutor {
     public typealias Model = CoreAIVisionLanguageModel
 

@@ -299,6 +299,7 @@ public enum InferenceRuntimeError: Error, LocalizedError {
 ///    token sequence and run prefill + decode
 ///
 /// The caller owns the embeddings and decides caching strategy.
+@available(macOS 27, iOS 27, *)
 public protocol MultimodalInferenceEngine: InferenceEngine {
     /// Encode an image into embeddings suitable for injection into the VLM.
     /// Returns the embedded representation — caller decides whether to cache.
