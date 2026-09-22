@@ -11,6 +11,7 @@ import Darwin
 
 /// Fixed-size state for non-truncatable persistent states.
 /// Allocated at full size on init, zero-initialized. No capacity management needed.
+@available(macOS 27, iOS 27, *)
 public final class FixedNDArrayState: SyncStateHandler {
     public let stateNames: [String]
     public let supportsTruncation: Bool = false
@@ -61,6 +62,7 @@ public final class FixedNDArrayState: SyncStateHandler {
 // MARK: - Growing NDArray State
 
 /// Dynamically-growing KV cache state. Starts small and doubles capacity.
+@available(macOS 27, iOS 27, *)
 public final class GrowingNDArrayState: SyncStateHandler {
     public let stateNames: [String]
     public let supportsTruncation: Bool = true
@@ -185,6 +187,7 @@ public final class GrowingNDArrayState: SyncStateHandler {
 
 // MARK: - Shared Utilities
 
+@available(macOS 27, iOS 27, *)
 func zeroFillNDArray(_ array: inout NDArray) {
     let count = array.shape.reduce(1, *)
     switch array.scalarType {

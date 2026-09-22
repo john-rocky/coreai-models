@@ -18,6 +18,7 @@ import Tokenizers
 ///
 /// The transformer computes 3D RoPE internally from the hidden_states shape.
 /// Operates on channels-first 5D latents [1, 16, T', H', W'].
+@available(macOS 27, iOS 27, *)
 public struct WanPipeline: VideoPipeline {
     // MARK: - Components
 

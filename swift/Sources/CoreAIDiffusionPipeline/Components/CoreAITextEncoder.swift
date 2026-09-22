@@ -8,6 +8,7 @@ import CoreAIShared
 import Foundation
 
 /// Core AI text encoder — wraps a CLIP/T5 model function.
+@available(macOS 27, iOS 27, *)
 public final class CoreAITextEncoder: Sendable {
     public let function: CoreAIDiffusionModelFunction
     public let tokenize: @Sendable (String) -> [Int32]

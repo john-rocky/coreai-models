@@ -7,6 +7,7 @@ import CoreAI
 import CoreAIShared
 import Foundation
 
+@available(macOS 27, iOS 27, *)
 extension SD3Pipeline {
     /// Load an SD 3.x pipeline from a directory containing .aimodel files,
     /// tokenizer/, tokenizer_2/, and pipeline.json.

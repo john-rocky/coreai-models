@@ -28,6 +28,7 @@ struct DiffusionPipelineTests {
         #expect(SchedulerType(rawValue: "pndm") == .pndm)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Descriptors auto-load and throw on bad path")
     func descriptorsThrowBeforeLoad() async {
         let fn = CoreAIDiffusionModelFunction(
@@ -36,6 +37,7 @@ struct DiffusionPipelineTests {
         await #expect(throws: (any Error).self) { try await fn.outputDescriptors }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Load with bad path throws")
     func loadBadPathThrows() async {
         let fn = CoreAIDiffusionModelFunction(

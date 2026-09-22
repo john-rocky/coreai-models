@@ -17,6 +17,7 @@ import Foundation
 ///
 /// T5-less path: the T5 portion of `encoder_hidden_states` is zero-padded
 /// (matches diffusers' `text_encoder_3=None` behaviour).
+@available(macOS 27, iOS 27, *)
 public struct SD3Pipeline: DiffusionPipeline {
     public let descriptor: PipelineDescriptor
 

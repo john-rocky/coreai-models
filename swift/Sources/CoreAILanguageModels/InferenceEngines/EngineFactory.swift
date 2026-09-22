@@ -16,6 +16,7 @@ import Metal
 ///
 /// Call ``createEngine(config:modelURL:options:)`` to create the engine, and pass an
 /// ``EngineOptions`` value to override the variant or customize the KV cache.
+@available(macOS 27, iOS 27, *)
 public struct EngineFactory: Sendable {
     /// Creates an inference engine for a model, selecting the variant from the model's structure.
     ///
@@ -350,6 +351,7 @@ public struct EngineOptions: Sendable {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 extension EngineFactory {
     /// Determines the appropriate engine variant based on model structure.
     private enum Variant: String, Sendable, CaseIterable {

@@ -8,6 +8,7 @@ import CoreAIShared
 import Foundation
 
 /// Loaded diffusion pipeline components backed by Core AI model functions.
+@available(macOS 27, iOS 27, *)
 public struct CoreAIDiffusionComponents: Sendable {
     public let textEncoder: CoreAITextEncoder
     public let denoiser: CoreAIDenoiser
@@ -36,6 +37,7 @@ public enum PipelineLoadError: Error, LocalizedError {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 extension PipelineDescriptor {
     /// Load Core AI components from a model directory based on this descriptor.
     ///

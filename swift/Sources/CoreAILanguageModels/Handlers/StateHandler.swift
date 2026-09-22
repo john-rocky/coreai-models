@@ -14,6 +14,7 @@ import CoreAI
 /// Handlers are classes (AnyObject) so they own their NDArrays at refcount 1 —
 /// `bind(into:)` calls `mutableRawView()` without triggering COW. The loop uses
 /// `_overrideLifetime` to express disjoint element access to the compiler.
+@available(macOS 27, iOS 27, *)
 public protocol SyncStateHandler: AnyObject {
     /// Names of the states managed by this handler.
     var stateNames: [String] { get }
@@ -53,6 +54,7 @@ public protocol SyncStateHandler: AnyObject {
 
 /// Detach lifetime dependencies from MutableViews so it can cross scope
 /// boundaries (closures, await). Caller must ensure inserted arrays remain valid.
+@available(macOS 27, iOS 27, *)
 @inline(__always)
 @_unsafeNonescapableResult
 @_lifetime(immortal)

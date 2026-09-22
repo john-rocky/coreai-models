@@ -21,6 +21,7 @@ struct CoreAISegmentationEngineTests {
         #expect(ModelIONameResolver.findImageInputName(in: ["text_tokens", "input_ids"]) == nil)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("findTextInputName: matches 'input_id', 'token', and 'text' variants")
     func findTextInputName() {
         #expect(CoreAISegmentationEngine.findTextInputName(in: ["pixel_values", "input_ids"]) == "input_ids")
@@ -28,6 +29,7 @@ struct CoreAISegmentationEngineTests {
         #expect(CoreAISegmentationEngine.findTextInputName(in: ["pixel_values", "embed_input"]) == nil)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("findTextInputName: ignores text_features (multi-function detect sibling)")
     func findTextInputNameSkipsFeatures() {
         // input_ids is the token input.
@@ -40,6 +42,7 @@ struct CoreAISegmentationEngineTests {
         )
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("findBackboneFeaturesName: matches outputs/inputs containing 'backbone'")
     func findBackboneFeaturesName() {
         #expect(
@@ -53,6 +56,7 @@ struct CoreAISegmentationEngineTests {
         #expect(CoreAISegmentationEngine.findBackboneFeaturesName(in: ["pred_masks"]) == nil)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("findTextFeaturesName: matches 'text_features' / 'text_feat' but not unrelated 'text' inputs")
     func findTextFeaturesName() {
         #expect(
@@ -64,6 +68,7 @@ struct CoreAISegmentationEngineTests {
         #expect(CoreAISegmentationEngine.findTextFeaturesName(in: ["text_tokens", "input_ids"]) == nil)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("findPointsInputName: matches 'point' but excludes 'point_label'")
     func findPointsInputName() {
         let inputs = ["batched_images", "batched_points", "batched_point_labels"]
@@ -71,6 +76,7 @@ struct CoreAISegmentationEngineTests {
         #expect(CoreAISegmentationEngine.findPointsInputName(in: ["pixel_values"]) == nil)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("findPointLabelsInputName: matches names with both 'point' and 'label'")
     func findPointLabelsInputName() {
         let inputs = ["batched_images", "batched_points", "batched_point_labels"]
@@ -90,6 +96,7 @@ struct CoreAISegmentationEngineTests {
         #expect(ModelIONameResolver.findLogitsOutputName(in: reversed) == "pred_logits")
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("findPresenceOutputName: picks presence_logits and not pred_logits")
     func findPresenceOutputName() {
         let outputs = ["pred_logits", "presence_logits", "pred_masks"]
@@ -97,6 +104,7 @@ struct CoreAISegmentationEngineTests {
         #expect(CoreAISegmentationEngine.findPresenceOutputName(in: ["pred_logits"]) == nil)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("findIouScoresOutputName: matches 'iou' or 'score' (skipping 'logit')")
     func findIouScoresOutputName() {
         #expect(CoreAISegmentationEngine.findIouScoresOutputName(in: ["pred_masks", "iou_scores"]) == "iou_scores")
@@ -107,6 +115,7 @@ struct CoreAISegmentationEngineTests {
 
     // MARK: - extractBoxesFromPointQuery
 
+    @available(macOS 27, iOS 27, *)
     @Test("extractBoxesFromPointQuery: empty queries → empty output")
     func extractBoxesEmpty() {
         let pointQuery = PointQuery()
@@ -116,6 +125,7 @@ struct CoreAISegmentationEngineTests {
         #expect(boxes.isEmpty)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("extractBoxesFromPointQuery: single box query produces normalized [x0,y0,x1,y1]")
     func extractBoxesSingleQuery() {
         let pointQuery = PointQuery(points: [
@@ -132,6 +142,7 @@ struct CoreAISegmentationEngineTests {
         #expect(abs(boxes[3] - 0.50) < 1e-6)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("extractBoxesFromPointQuery: query without TL/BR pair zeros that slot")
     func extractBoxesPartialPair() {
         let pointQuery = PointQuery(queries: [
@@ -148,6 +159,7 @@ struct CoreAISegmentationEngineTests {
         #expect(boxes[4] == 0 && boxes[5] == 0 && boxes[6] == 0 && boxes[7] == 0)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("extractBoxesFromPointQuery: zero imageSize is treated as empty (no NaN/inf)")
     func extractBoxesZeroSize() {
         let pointQuery = PointQuery(points: [
@@ -160,6 +172,7 @@ struct CoreAISegmentationEngineTests {
 
     // MARK: - sliceUserQueries
 
+    @available(macOS 27, iOS 27, *)
     @Test("sliceUserQueries: trims phantom slots from masks + scores")
     func sliceUserQueriesUnderfill() {
         // [B=1, Q=3, H=2, W=2] — 12 values. Per-query: query 0 = 1.0s, query 1 = 2.0s, query 2 = 3.0s.
@@ -177,6 +190,7 @@ struct CoreAISegmentationEngineTests {
         #expect(outScores == [0.7])
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("sliceUserQueries: no-op when userQueryCount == Q")
     func sliceUserQueriesNoOp() {
         let masks: [Float] = [1, 2, 3, 4]
@@ -191,6 +205,7 @@ struct CoreAISegmentationEngineTests {
 
     // MARK: - Token value indexing
 
+    @available(macOS 27, iOS 27, *)
     @Test("tokenValue: reads tokens in row-major order, pads out-of-range with EOT")
     func tokenValueIndexing() {
         let eot: Int32 = 49407
@@ -221,6 +236,7 @@ struct CoreAISegmentationEngineTests {
 
     // MARK: - Embedding value indexing
 
+    @available(macOS 27, iOS 27, *)
     @Test("embeddingValue: reads [batch, seq, hidden] flat in C-order, zero-pads out-of-range")
     func embeddingValueIndexing() {
         // batch=1, sequenceLength=2, hiddenSize=3: flat layout [b][s][h]
@@ -255,6 +271,7 @@ struct CoreAISegmentationEngineTests {
 
     // MARK: - reduceBestOfK
 
+    @available(macOS 27, iOS 27, *)
     @Test("reduceBestOfK: picks the highest-scoring K per (B, Q) and copies its mask slab")
     func reduceBestOfKHappyPath() {
         // [B=1, Q=2, K=3, H=2, W=2]: 12 mask floats per (B, Q), 3 candidates each.
@@ -285,6 +302,7 @@ struct CoreAISegmentationEngineTests {
         #expect(abs(result.scores[1] - 0.6) < 1e-6)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("reduceBestOfK: ties go to the first candidate (stable argmax)")
     func reduceBestOfKTieBreaking() {
         // K=3 with all-equal scores → bestCandidate stays 0.
@@ -301,6 +319,7 @@ struct CoreAISegmentationEngineTests {
         #expect(result.scores == [0.5])
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("reduceBestOfK: B=2 keeps batches independent")
     func reduceBestOfKMultipleBatches() {
         // [B=2, Q=1, K=2, H=1, W=1] → 1 float per slab.
@@ -320,6 +339,7 @@ struct CoreAISegmentationEngineTests {
 
     // MARK: - resolveQueries
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: empty queries fan out to a gridSide×gridSide foreground grid")
     func resolveQueriesSegmentEverything() throws {
         let imageWidth: Float = 100
@@ -348,6 +368,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: non-square queryCount in segment-everything throws")
     func resolveQueriesNonSquareThrows() {
         #expect(throws: SegmentationRuntimeError.self) {
@@ -361,6 +382,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: too many queries vs model capacity throws")
     func resolveQueriesTooManyQueriesThrows() {
         let pointQuery = PointQuery(queries: [
@@ -379,6 +401,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: too many points in a query throws")
     func resolveQueriesTooManyPointsThrows() {
         let pointQuery = PointQuery(queries: [
@@ -395,6 +418,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: well-formed user queries pass through unchanged")
     func resolveQueriesPassThrough() throws {
         let pointQuery = PointQuery(queries: [
@@ -413,6 +437,7 @@ struct CoreAISegmentationEngineTests {
         #expect(resolved[1][0].label == .background)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: empty inner query throws")
     func resolveQueriesEmptyQueryThrows() {
         let pointQuery = PointQuery(queries: [
@@ -425,6 +450,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: point outside image bounds throws")
     func resolveQueriesOutOfBoundsThrows() {
         let pointQuery = PointQuery(queries: [
@@ -436,6 +462,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: negative coordinate throws")
     func resolveQueriesNegativeCoordThrows() {
         let pointQuery = PointQuery(queries: [
@@ -447,6 +474,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: NaN coordinate throws")
     func resolveQueriesNaNCoordThrows() {
         let pointQuery = PointQuery(queries: [
@@ -458,6 +486,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: points exactly on image edges are allowed")
     func resolveQueriesEdgeCoordsAllowed() throws {
         let pointQuery = PointQuery(queries: [
@@ -469,6 +498,7 @@ struct CoreAISegmentationEngineTests {
         #expect(resolved.count == 2)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: lone box-top-left without box-bottom-right throws")
     func resolveQueriesLoneTopLeftThrows() {
         let pointQuery = PointQuery(queries: [
@@ -480,6 +510,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: lone box-bottom-right without box-top-left throws")
     func resolveQueriesLoneBottomRightThrows() {
         let pointQuery = PointQuery(queries: [
@@ -491,6 +522,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: multiple box-top-left in one query throws")
     func resolveQueriesMultipleTopLeftThrows() {
         let pointQuery = PointQuery(queries: [
@@ -506,6 +538,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: multiple box-bottom-right in one query throws")
     func resolveQueriesMultipleBottomRightThrows() {
         let pointQuery = PointQuery(queries: [
@@ -521,6 +554,7 @@ struct CoreAISegmentationEngineTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("resolveQueries: box pair plus refinement clicks is allowed")
     func resolveQueriesBoxWithRefinementAllowed() throws {
         let pointQuery = PointQuery(queries: [

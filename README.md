@@ -20,7 +20,10 @@
 > - **Export**: `build_macos_export_spec` / `export_core()` shims for the hybrid ports on top
 >   of upstream's export contract, plus multifunction export.
 >
-> **Tags.** Use `0.2.5-zoo` or later. `0.2.5-zoo` stops the engine at a stop sequence instead of
+> **Tags.** Use `0.2.5-zoo` or later, `0.2.6-zoo` if your package declares a floor below 27.
+> `0.2.6-zoo` declares a macOS 26 / iOS 26 floor with `@available(macOS 27, iOS 27, *)` on
+> everything that touches Core AI, so packages with a lower floor can depend on it (see
+> Requirements); nothing runs below 27. `0.2.5-zoo` stops the engine at a stop sequence instead of
 > draining it to `maxTokens` (`VanillaDecodingStrategy`): before it, every chat turn on the
 > pipelined engine kept decoding for the whole remaining response budget after EOS — a 14-token
 > LFM2.5 1.2B answer with a 2048 cap took 8.3 s to complete on an M4 Max (0.4 s with a 64 cap),
@@ -68,6 +71,8 @@ Once installed successfully, refer to the README.md for each model or family of 
 - **macOS and iOS 27.0+**
 
 - **Xcode 27.0+**
+
+The Swift package declares a macOS 26 / iOS 26 floor so that packages with a lower floor can depend on it. Every API that touches Core AI is marked `@available(macOS 27, iOS 27, *)`; a caller with a lower floor guards it with `#available`, and the Core AI framework is weak-linked automatically. Nothing runs below 27.
 
 Core AI models are exported as standalone `.aimodel` files for integration into apps via the Core AI framework.
 

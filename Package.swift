@@ -9,7 +9,13 @@ import PackageDescription
 
 let package = Package(
     name: "coreai-models",
-    platforms: [.macOS("27.0"), .iOS("27.0")],
+    // The declared floor is one release below what the code needs, so that packages
+    // with a macOS 26 / iOS 26 floor can depend on these products (SwiftPM refuses a
+    // dependency on a product with a higher floor, even behind a trait). Every
+    // declaration that touches the Core AI framework carries
+    // `@available(macOS 27, iOS 27, *)`, and the compiler makes a lower-floor caller
+    // guard it with `#available`. Nothing here runs below 27.
+    platforms: [.macOS("26.0"), .iOS("26.0")],
     products: [
         .library(
             name: "CoreAILM",

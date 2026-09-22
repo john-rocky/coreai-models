@@ -30,6 +30,7 @@ enum PrefillStrategy {
 ///
 /// KV cache NDArrays start small (256 tokens) and grow dynamically with 2× expansion.
 /// Passed as `states` on every forward pass; the model graph updates them in-place.
+@available(macOS 27, iOS 27, *)
 public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable {
     public typealias ConfigType = ModelConfig
 
@@ -453,6 +454,7 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
     // MARK: - Helpers
 }
 
+@available(macOS 27, iOS 27, *)
 extension CoreAISequentialEngine {
     /// Async sequence of `InferenceOutput` produced by `generate()`.
     public struct GenerationSequence: InferenceOutputSequence {
@@ -487,6 +489,7 @@ extension CoreAISequentialEngine {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 extension CoreAISequentialEngine.GenerationSequence {
     public final class Iterator: AsyncIteratorProtocol {
         public typealias Element = InferenceOutput

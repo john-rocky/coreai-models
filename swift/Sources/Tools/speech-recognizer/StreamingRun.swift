@@ -38,6 +38,7 @@ private func fittedTail(_ text: String, width: Int) -> String {
 /// This repo does not capture audio — a host app owns `AVAudioEngine` and pushes PCM in.
 /// Replaying a file through the same `append(pcm:)` entry point is what makes streaming
 /// testable and lets it be compared against the offline path.
+@available(macOS 27, iOS 27, *)
 func runStreaming(
     bundleURL: URL,
     audioPath: String,

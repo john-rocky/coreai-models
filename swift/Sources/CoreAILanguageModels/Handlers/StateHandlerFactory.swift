@@ -17,6 +17,7 @@ public enum StateKind: String, Codable, Sendable {
 }
 
 /// Result of state handler creation.
+@available(macOS 27, iOS 27, *)
 struct SyncStateHandlerSet {
     /// Growing states (KV caches with dynamic sequence dimension).
     var kvCache: any SyncStateHandler
@@ -32,6 +33,7 @@ struct SyncStateHandlerSet {
 /// 1. Explicit metadata (`"states"` field in metadata.json) — preferred
 /// 2. Shape-based heuristic — dynamic dim → kvCache, static + "cache" in name → slidingCache, else → fixed
 /// 3. Legacy (2 states) — both kvCache, no warning
+@available(macOS 27, iOS 27, *)
 enum StateHandlerFactory {
     /// Classify states using metadata or heuristic fallback.
     static func classifyStates(

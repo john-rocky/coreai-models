@@ -8,6 +8,7 @@ import CoreAIShared
 import Foundation
 import Tokenizers
 
+@available(macOS 27, iOS 27, *)
 extension Flux2Pipeline {
     /// Load a FLUX.2 pipeline from a directory containing .aimodel files, tokenizer/, and pipeline.json.
     ///

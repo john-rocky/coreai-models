@@ -16,6 +16,7 @@ import Testing
 struct ModelResourcesTests {
     private struct LoadFailure: Error {}
 
+    @available(macOS 27, iOS 27, *)
     @Test("Lazy: nothing loads until first use")
     func lazyDefersLoad() {
         let calls = Mutex(0)
@@ -27,6 +28,7 @@ struct ModelResourcesTests {
         #expect(calls.withLock { $0 } == 0)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("load() marks loaded and runs the loader exactly once")
     func loadOnce() async throws {
         let calls = Mutex(0)
@@ -44,6 +46,7 @@ struct ModelResourcesTests {
         #expect((first as? MockEngine) === (second as? MockEngine))
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("unload() frees the engine; next use reloads")
     func unloadThenReload() async throws {
         let calls = Mutex(0)
@@ -63,6 +66,7 @@ struct ModelResourcesTests {
         #expect(calls.withLock { $0 } == 2)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Failures aren't cached — the next call retries")
     func retriesOnFailure() async throws {
         let calls = Mutex(0)
@@ -86,6 +90,7 @@ struct ModelResourcesTests {
         #expect(calls.withLock { $0 } == 2)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Concurrent callers share a single load")
     func concurrentCallersLoadOnce() async throws {
         let calls = Mutex(0)
@@ -107,6 +112,7 @@ struct ModelResourcesTests {
         #expect(resources.isLoaded)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("unloadResources during an active borrow defers teardown until it finishes")
     func unloadDeferredDuringActiveBorrow() async throws {
         let resources = ModelResources { MockEngine() }

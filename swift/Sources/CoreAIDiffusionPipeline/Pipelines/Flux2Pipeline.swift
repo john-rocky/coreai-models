@@ -16,6 +16,7 @@ import Tokenizers
 ///
 /// RoPE is computed inside the transformer graph; this pipeline only supplies
 /// position IDs, which depend on grid geometry alone.
+@available(macOS 27, iOS 27, *)
 public struct Flux2Pipeline: DiffusionPipeline {
     public let descriptor: PipelineDescriptor
     public let mode: DecodeResolution

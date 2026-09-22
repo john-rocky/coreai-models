@@ -12,6 +12,7 @@ import CoreText
 import Foundation
 import ImageIO
 
+@available(macOS 27, iOS 27, *)
 @main
 struct ObjectDetectorCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

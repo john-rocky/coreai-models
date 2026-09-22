@@ -9,6 +9,7 @@ import Metal
 
 /// Fixed-size MTLBuffer state for non-truncatable persistent states (pipelined engine).
 /// Allocated once at init, zero-initialized, never grows.
+@available(macOS 27, iOS 27, *)
 public final class FixedMTLBufferState {
     public let stateNames: [String]
     public var stateCount: Int { bindings.count }

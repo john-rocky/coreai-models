@@ -7,6 +7,7 @@ import CoreAI
 
 /// Run an inference step with combined primary + secondary states and output.
 /// Zero-copy: bind(into:) uses reference-backed storage and _overrideLifetime.
+@available(macOS 27, iOS 27, *)
 func runWithStates(
     function: InferenceFunction,
     inputs: [String: NDArray],

@@ -70,6 +70,7 @@ public struct VLMModelConfig: InferenceConfiguration, Codable, Sendable {
 ///
 /// KV cache is managed identically to `CoreAISequentialEngine`: starts small and grows
 /// dynamically with 2x expansion.
+@available(macOS 27, iOS 27, *)
 public final class CoreAISequentialVLMEngine: MultimodalInferenceEngine, @unchecked Sendable {
     public typealias ConfigType = VLMModelConfig
     public typealias OutputSequence = GenerationSequence
@@ -1020,6 +1021,7 @@ public final class CoreAISequentialVLMEngine: MultimodalInferenceEngine, @unchec
 
 // MARK: - Generation Sequence
 
+@available(macOS 27, iOS 27, *)
 extension CoreAISequentialVLMEngine {
     /// Async sequence of `InferenceOutput` produced by `generate()`.
     public struct GenerationSequence: InferenceOutputSequence {
@@ -1057,6 +1059,7 @@ extension CoreAISequentialVLMEngine {
 
 // MARK: - Generation Iterator
 
+@available(macOS 27, iOS 27, *)
 extension CoreAISequentialVLMEngine.GenerationSequence {
     public final class Iterator: AsyncIteratorProtocol {
         public typealias Element = InferenceOutput

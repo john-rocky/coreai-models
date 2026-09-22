@@ -11,6 +11,7 @@ import Foundation
 import Hummingbird
 import Tokenizers
 
+@available(macOS 27, iOS 27, *)
 @main
 struct LLMServer: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

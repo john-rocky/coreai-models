@@ -22,6 +22,7 @@ struct PublicInterfaceTests {
     /// let response = try await session.respond(to: "…")
     /// print(response.content)
     /// ```
+    @available(macOS 27, iOS 27, *)
     @Test("Documented public usage compiles (runtime throws on missing asset)")
     func documentedUsageCompiles() async {
         let missing = URL(fileURLWithPath: "/nonexistent/model")
@@ -34,6 +35,7 @@ struct PublicInterfaceTests {
     }
 
     /// Compile-time check that the resource-control surface
+    @available(macOS 27, iOS 27, *)
     @Test("Resource-control API compiles (runtime throws on missing asset)")
     func resourceControlAPICompiles() async {
         let missing = URL(fileURLWithPath: "/nonexistent/model")

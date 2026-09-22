@@ -7,6 +7,7 @@ import CoreAI
 import CoreGraphics
 
 /// Output from a text encoder — hidden states with optional pooled embedding.
+@available(macOS 27, iOS 27, *)
 public struct TextEncoderOutput: Sendable {
     /// Token-level embeddings [1, seq_len, hidden_dim].
     public let hiddenStates: NDArray

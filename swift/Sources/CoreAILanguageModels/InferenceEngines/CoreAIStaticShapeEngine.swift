@@ -9,6 +9,7 @@ import Foundation
 import Synchronization
 
 /// Static-shape inference engine using Core AI models.
+@available(macOS 27, iOS 27, *)
 public final class StaticShapeEngine: InferenceEngine, @unchecked Sendable {
     public typealias ConfigType = ModelConfig
 
@@ -607,6 +608,7 @@ public final class StaticShapeEngine: InferenceEngine, @unchecked Sendable {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 extension StaticShapeEngine {
     /// Async sequence of `InferenceOutput` produced by `generate()`.
     ///
@@ -645,6 +647,7 @@ extension StaticShapeEngine {
     }
 }
 
+@available(macOS 27, iOS 27, *)
 extension StaticShapeEngine.GenerationSequence {
     public struct Iterator: AsyncIteratorProtocol {
         public typealias Element = InferenceOutput

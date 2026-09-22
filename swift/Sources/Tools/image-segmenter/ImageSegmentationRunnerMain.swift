@@ -11,6 +11,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 
+@available(macOS 27, iOS 27, *)
 @main
 struct ImageSegmenterCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

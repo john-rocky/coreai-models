@@ -29,6 +29,7 @@ import Tokenizers
 /// // ... generate ...
 /// model.unload()
 /// ```
+@available(macOS 27, iOS 27, *)
 public struct CoreAILanguageModel: LanguageModel {
     public enum LoadMode: Sendable {
         case lazy

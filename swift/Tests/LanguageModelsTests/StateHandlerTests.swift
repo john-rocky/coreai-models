@@ -13,6 +13,7 @@ import Testing
 
 @Suite("ZeroFill NDArray Tests")
 struct ZeroFillNDArrayTests {
+    @available(macOS 27, iOS 27, *)
     @Test("Zero-fills a Float16 NDArray")
     func zeroFillFloat16() {
         var array = NDArray(shape: [2, 4], scalarType: .float16)
@@ -24,6 +25,7 @@ struct ZeroFillNDArrayTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Zero-fills a Float32 NDArray")
     func zeroFillFloat32() {
         var array = NDArray(shape: [2, 4], scalarType: .float32)
@@ -35,6 +37,7 @@ struct ZeroFillNDArrayTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Zero-fills a high-rank NDArray")
     func zeroFillHighRank() {
         var array = NDArray(shape: [2, 4, 8, 16], scalarType: .float16)
@@ -78,11 +81,13 @@ struct StateKindTests {
 
 @Suite("StateHandler Conformance Tests")
 struct StateHandlerConformanceTests {
+    @available(macOS 27, iOS 27, *)
     @Test("GrowingNDArrayState conforms to SyncStateHandler")
     func growingConformance() {
         let _: any SyncStateHandler.Type = GrowingNDArrayState.self
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("FixedNDArrayState conforms to SyncStateHandler")
     func fixedConformance() {
         let _: any SyncStateHandler.Type = FixedNDArrayState.self
@@ -92,6 +97,7 @@ struct StateHandlerConformanceTests {
 // MARK: - withBoundStates Tests
 
 /// Minimal state handler for testing the binding API.
+@available(macOS 27, iOS 27, *)
 final class MockStateHandler: SyncStateHandler {
     var stateNames: [String]
     var stateCount: Int { arrays.count }
@@ -127,6 +133,7 @@ final class MockStateHandler: SyncStateHandler {
 
 @Suite("bind(into:) Tests")
 struct BindTests {
+    @available(macOS 27, iOS 27, *)
     @Test("binds 1 through 4 states into MutableViews")
     func bindsVariousCounts() {
         for count in 1...4 {
@@ -137,6 +144,7 @@ struct BindTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("preserves state data through bind")
     func preservesData() {
         let handler = MockStateHandler(names: ["s0"], shape: [1, 4], scalarType: .float32)
@@ -151,6 +159,7 @@ struct BindTests {
         #expect(values == [1.0, 2.0, 3.0, 4.0])
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("multiple handlers compose into single MutableViews")
     func composesHandlers() {
         let primary = MockStateHandler(names: ["kv0", "kv1"], shape: [1, 4])

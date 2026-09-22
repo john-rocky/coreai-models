@@ -22,6 +22,7 @@ import Metal
 ///
 /// Note:
 /// - Does not preserve data when storage grows.
+@available(macOS 27, iOS 27, *)
 struct GrowingLogitsBuffer: ~Copyable {
     let name: String
     let device: MTLDevice

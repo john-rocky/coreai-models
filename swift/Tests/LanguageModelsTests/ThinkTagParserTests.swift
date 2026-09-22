@@ -239,6 +239,7 @@ struct ThinkTagParserAgenticTests {
 
 @Suite("ThinkTagParser — Format detection")
 struct ThinkTagParserDetectionTests {
+    @available(macOS 27, iOS 27, *)
     @Test("Tokenizer with think tags detects tag-pair format")
     func detectsTagPairForThinkTokens() {
         let tokenizer = MockTokenizer(vocab: [
@@ -254,6 +255,7 @@ struct ThinkTagParserDetectionTests {
         #expect(close == "</think>")
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Agentic tokenizer (eom+eot+message) detects agentic format")
     func detectsAgenticFormat() {
         let tokenizer = MockTokenizer(vocab: [
@@ -272,6 +274,7 @@ struct ThinkTagParserDetectionTests {
         #expect(eot == "<|eot|>")
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Tokenizer with reasoning_start/end detects that variant")
     func detectsReasoningStartEnd() {
         let tokenizer = MockTokenizer(vocab: [
@@ -287,6 +290,7 @@ struct ThinkTagParserDetectionTests {
         #expect(close == "<|reasoning_end|>")
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Plain tokenizer (no special tokens) falls back to <think>")
     func fallbackToThinkTags() {
         let tokenizer = MockTokenizer(vocab: ["<eos>": 2])
@@ -299,6 +303,7 @@ struct ThinkTagParserDetectionTests {
         #expect(close == "</think>")
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Agentic format takes priority over tag-pair when both present")
     func agenticPriorityOverTagPair() {
         let tokenizer = MockTokenizer(vocab: [
@@ -314,6 +319,7 @@ struct ThinkTagParserDetectionTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("eom+eot without message token falls back to tag-pair")
     func eomEotWithoutMessageFallsBack() {
         let tokenizer = MockTokenizer(vocab: [

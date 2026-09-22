@@ -12,10 +12,12 @@ import Testing
 
 @Suite("Bundle architecture detection")
 struct BundleArchitectureTests {
+    @available(macOS 27, iOS 27, *)
     private func architecture(_ json: String) -> SpeechRecognitionBundle.Architecture {
         SpeechRecognitionBundle.architecture(from: Data(json.utf8))
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Explicit architectures are recognized")
     func explicitArchitectures() {
         #expect(architecture(#"{"config": {"architecture": "parakeet_tdt"}}"#) == .parakeetTDT)
@@ -34,6 +36,7 @@ struct BundleArchitectureTests {
             #"{"#,
             "",
         ])
+    @available(macOS 27, iOS 27, *)
     func unrecognizedDegradesToWhisper(json: String) {
         #expect(architecture(json) == .whisper)
     }

@@ -24,6 +24,7 @@ final class PhaseTiming: @unchecked Sendable {
     var stepTimes: [Double] = []
 }
 
+@available(macOS 27, iOS 27, *)
 @main
 struct VideoDiffusionRunner: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

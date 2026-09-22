@@ -10,6 +10,7 @@ import Testing
 
 @Suite("InputHandler Tests")
 struct InputHandlerTests {
+    @available(macOS 27, iOS 27, *)
     @Test("TokenInputHandler conforms to SyncInputHandler")
     func tokenConformance() {
         let _: any SyncInputHandler.Type = TokenInputHandler.self
@@ -37,6 +38,7 @@ struct InputHandlerTests {
         #expect(ctx.slidingWindow == 256)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("InputCoverage.verify passes when all inputs covered")
     func coveragePass() throws {
         // This is a compile-time API check — we can't easily construct a descriptor

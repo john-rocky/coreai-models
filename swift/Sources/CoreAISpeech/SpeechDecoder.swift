@@ -10,6 +10,7 @@ import Foundation
 // MARK: - DecoderResources
 
 /// Architecture-specific assets handed to a `SpeechDecoder` per call.
+@available(macOS 27, iOS 27, *)
 public enum DecoderResources: Sendable {
     case whisper(decoder: AIModel, generationConfig: GenerationConfig)
     case parakeetTDT(decoderStep: AIModel, joint: AIModel, config: ParakeetTDTConfig)
@@ -89,6 +90,7 @@ public struct DecodeStats: Sendable {
 // MARK: - SpeechDecoder protocol
 
 /// Model-specific decode logic.
+@available(macOS 27, iOS 27, *)
 public protocol SpeechDecoder: Sendable {
     func decode(
         encoderOutput: NDArray,
@@ -101,6 +103,7 @@ public protocol SpeechDecoder: Sendable {
 // MARK: - Helpers
 
 /// Greedy decoder for Whisper (encoder-decoder, cross-attention, KV cache).
+@available(macOS 27, iOS 27, *)
 public struct WhisperDecoder: SpeechDecoder {
     public init() {}
 

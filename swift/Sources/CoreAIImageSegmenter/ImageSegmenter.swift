@@ -31,6 +31,7 @@ import Foundation
 ///     [.init(x: 300, y: 300)],
 /// ])
 /// ```
+@available(macOS 27, iOS 27, *)
 public struct ImageSegmenter {
     private let engine: CoreAISegmentationEngine
     private let tokenizer: CLIPTokenizer?

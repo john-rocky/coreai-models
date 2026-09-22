@@ -11,6 +11,7 @@ import Foundation
 /// Used by multimodal engines to pass vision/audio embeddings into the
 /// language model. The engine performs scatter-merge: replacing placeholder
 /// token positions with these embeddings before the first forward pass.
+@available(macOS 27, iOS 27, *)
 public struct InputEmbeddings: Sendable {
     /// The embedding tensor, shape [batch, seq_len, hidden_dim].
     /// Scalar type matches the LLM's expected input (float16, bFloat16, etc.).

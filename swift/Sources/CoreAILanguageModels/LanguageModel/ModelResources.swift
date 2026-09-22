@@ -10,6 +10,7 @@ import Synchronization
 // MARK: - Resource management
 
 /// Owns the load / unload lifecycle of a single inference engine.
+@available(macOS 27, iOS 27, *)
 final class ModelResources: ResourceManaging {
     private struct State {
         var loaded: (any InferenceEngine)?

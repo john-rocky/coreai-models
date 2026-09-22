@@ -18,6 +18,7 @@ import Testing
 @Suite("TDT argmax ranges")
 struct TDTArgmaxTests {
     /// A `[1, 1, values.count]` logits row, shaped like the joint's output.
+    @available(macOS 27, iOS 27, *)
     private func logitsRow(
         _ values: [Float], scalarType: NDArray.ScalarType = .float32
     ) -> NDArray {
@@ -29,6 +30,7 @@ struct TDTArgmaxTests {
     /// Half of the invariant the reviewer questioned: `lastToken == blankTokenId` only means "the
     /// previous step emitted blank" if blank is a value the token argmax can actually produce.
     /// Blank sits at the top of the vocab range, so it must be reachable.
+    @available(macOS 27, iOS 27, *)
     @Test("Every vocab id including blank is reachable by the token argmax")
     func blankIsReachable() {
         let vocabSize = 1_030
@@ -40,6 +42,7 @@ struct TDTArgmaxTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Duration indices stay inside the durations array")
     func durationIndicesAreInRange() {
         // The duration argmax indexes `cfg.durations` with a range-relative result, so an
@@ -71,6 +74,7 @@ struct TDTValidationTests {
             encoderNumMelBins: 128, encoderSubsamplingFactor: 8)
     }
 
+    @available(macOS 27, iOS 27, *)
     private static func validate(
         shape: [Int] = [1, 100, 640], logitsSize: Int = 1_030, config: ParakeetTDTConfig
     ) throws {
@@ -78,6 +82,7 @@ struct TDTValidationTests {
             encoderOutputShape: shape, logitsSize: logitsSize, config: config)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("A well-formed configuration validates")
     func wellFormedValidates() throws {
         try Self.validate(config: Self.config())
@@ -86,6 +91,7 @@ struct TDTValidationTests {
     /// The other half of the reviewer's invariant, and the guard the blank bookkeeping rests on.
     /// A blank id outside the argmax range could never win, so `isBlank` would never fire and every
     /// frame's argmax would be emitted as a real token.
+    @available(macOS 27, iOS 27, *)
     @Test("A blank id outside the vocab range is rejected", arguments: [1_025, 1_030, -1])
     func blankOutsideVocabIsRejected(blank: Int) {
         let cfg = Self.config(blankTokenId: Int32(blank))
@@ -98,12 +104,14 @@ struct TDTValidationTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("A blank id at the top of the vocab is accepted")
     func blankAtTopOfVocabAccepted() throws {
         // Boundary in the permitted direction: vocabSize - 1 is the largest legal blank id.
         try Self.validate(config: Self.config(vocabSize: 1_025, blankTokenId: 1_024))
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("A joint logits width mismatch is rejected", arguments: [1_029, 1_031])
     func logitsWidthMismatchRejected(width: Int) {
         #expect(throws: (any Error).self) {
@@ -114,12 +122,14 @@ struct TDTValidationTests {
     @Test(
         "A non-rank-three encoder output is rejected",
         arguments: [[1, 100], [1, 100, 640, 1], [640]])
+    @available(macOS 27, iOS 27, *)
     func nonRankThreeRejected(shape: [Int]) {
         #expect(throws: (any Error).self) {
             try Self.validate(shape: shape, config: Self.config())
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("A batch size other than one is rejected")
     func nonUnitBatchRejected() {
         #expect(throws: (any Error).self) {
@@ -127,6 +137,7 @@ struct TDTValidationTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("A hidden size mismatch is rejected")
     func hiddenSizeMismatchRejected() {
         #expect(throws: (any Error).self) {
@@ -134,6 +145,7 @@ struct TDTValidationTests {
         }
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("A zero-length encoder output passes validation")
     func zeroLengthPassesValidation() throws {
         // `decode` handles tEnc == 0 by returning early, so validation must not reject it.

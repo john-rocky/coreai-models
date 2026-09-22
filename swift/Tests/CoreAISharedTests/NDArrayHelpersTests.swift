@@ -18,6 +18,7 @@ import Testing
 @Suite("argmaxFloat")
 struct ArgmaxFloatTests {
     /// A `[1, 1, values.count]` row, the shape a joint or classifier head emits.
+    @available(macOS 27, iOS 27, *)
     private func row(
         _ values: [Float], scalarType: NDArray.ScalarType = .float32
     ) -> NDArray {
@@ -26,11 +27,13 @@ struct ArgmaxFloatTests {
         return array
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Returns the index of the largest value")
     func returnsLargest() {
         #expect(argmaxFloat(row([1, 5, 3]), in: 0..<3) == 1)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Ties go to the lowest index")
     func tiesGoLow() {
         // Documented contract, and it differs from CoreAISpeech's WhisperDecoder, whose
@@ -39,11 +42,13 @@ struct ArgmaxFloatTests {
         #expect(argmaxFloat(row([2, 2, 1]), in: 0..<3) == 0)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("An all-negative-infinity range returns zero")
     func allNegativeInfinityReturnsZero() {
         #expect(argmaxFloat(row([-.infinity, -.infinity]), in: 0..<2) == 0)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Indices are relative to the range lower bound")
     func indicesAreRelative() {
         // Callers index their own side tables with the result, so an absolute index would read
@@ -51,6 +56,7 @@ struct ArgmaxFloatTests {
         #expect(argmaxFloat(row([9, 9, 0, 7]), in: 2..<4) == 1)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("A single-element range returns zero")
     func singleElementRange() {
         #expect(argmaxFloat(row([4, 8, 2]), in: 1..<2) == 0)
@@ -58,6 +64,7 @@ struct ArgmaxFloatTests {
 
     /// The scan converts as it reads, so an f16 row — what a `--dtype float16` bundle emits —
     /// must order identically to f32.
+    @available(macOS 27, iOS 27, *)
     @Test("An f16 row scans the same as f32")
     func float16RowMatches() {
         let values: [Float] = [1, 5, 3, 5, 2]
@@ -74,6 +81,7 @@ struct ArgmaxFloatTests {
 @Suite("floatElements")
 struct FloatElementsTests {
     /// A `[1, outer, inner]` output, the shape a sliced sequence output takes.
+    @available(macOS 27, iOS 27, *)
     private func output(
         outer: Int, inner: Int, scalarType: NDArray.ScalarType = .float32
     ) -> NDArray {
@@ -82,6 +90,7 @@ struct FloatElementsTests {
         return array
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Converts exactly the requested range, in row-major order")
     func convertsRequestedRange() {
         let array = output(outer: 4, inner: 3)
@@ -91,12 +100,14 @@ struct FloatElementsTests {
         #expect(floatElements(array, in: 0..<12).count == 12)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("An empty range converts to nothing")
     func emptyRange() {
         #expect(floatElements(output(outer: 2, inner: 3), in: 3..<3).isEmpty)
     }
 
     /// The usual case at runtime: a `--dtype float16` bundle's output, converted up.
+    @available(macOS 27, iOS 27, *)
     @Test("An f16 output converts to the same values as f32")
     func float16Matches() {
         let expected: [Float] = [3, 4, 5]
@@ -108,6 +119,7 @@ struct FloatElementsTests {
 
 @Suite("BFloat16 Flatten")
 struct BFloat16FlattenTests {
+    @available(macOS 27, iOS 27, *)
     @Test("flattenBFloat16NDArray converts known values correctly")
     func knownValues() {
         // BFloat16 for 1.0 = 0x3F80, for -2.0 = 0xC000, for 0.5 = 0x3F00
@@ -124,6 +136,7 @@ struct BFloat16FlattenTests {
         #expect(result == expected)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("flattenAsFloat dispatches bfloat16 correctly")
     func flattenAsFloatBF16() {
         var array = NDArray(shape: [2], scalarType: .bfloat16)
@@ -155,6 +168,7 @@ struct BFloat16FlattenTests {
 /// real asset whose descriptor reports padded strides.
 @Suite("Stride-aware fill and read")
 struct StrideAwareFillReadTests {
+    @available(macOS 27, iOS 27, *)
     private func elementCount(_ array: NDArray) -> Int {
         array.view(as: Float.self).withUnsafePointer { _, shape, _ in
             (0..<shape.count).reduce(1) { $0 * shape[$1] }
@@ -162,6 +176,7 @@ struct StrideAwareFillReadTests {
     }
 
     /// FLUX.2 `img_ids`: one row per image token as [T, H, W, L].
+    @available(macOS 27, iOS 27, *)
     @Test("A [1, 4096, 4] position-ID buffer round-trips exactly")
     func imageIdsRoundTrip() {
         let side = 64
@@ -184,6 +199,7 @@ struct StrideAwareFillReadTests {
     }
 
     /// FLUX.2 `txt_ids`: sequence index on the last axis, spatial axes unused.
+    @available(macOS 27, iOS 27, *)
     @Test("A [1, 512, 4] position-ID buffer round-trips exactly")
     func textIdsRoundTrip() {
         let textSeqLen = 512
@@ -200,6 +216,7 @@ struct StrideAwareFillReadTests {
 
     /// A distinct value per element, so any displacement shows up rather than cancelling
     /// against a repeated coordinate.
+    @available(macOS 27, iOS 27, *)
     @Test("Every element of a small-innermost-dimension buffer is placed distinctly")
     func distinctValuesSurviveRoundTrip() {
         var array = NDArray(shape: [1, 1024, 4], scalarType: .float32)
@@ -211,6 +228,7 @@ struct StrideAwareFillReadTests {
 
     /// A large innermost dimension needs no padding, so this is the layout the pre-computed
     /// RoPE tables used — and why the defect stayed hidden until an id-shaped input appeared.
+    @available(macOS 27, iOS 27, *)
     @Test("A [4608, 128] table round-trips exactly")
     func denseTableRoundTrip() {
         var array = NDArray(shape: [4608, 128], scalarType: .float32)

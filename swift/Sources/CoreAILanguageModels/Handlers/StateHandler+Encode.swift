@@ -8,6 +8,7 @@ import Metal
 
 /// Encode an inference step with KV cache states, optional additional MTLBuffer
 /// states, and logits output.
+@available(macOS 27, iOS 27, *)
 func encodeWithStates(
     function: InferenceFunction,
     inputs: [String: InferenceFunction.AsyncValue],

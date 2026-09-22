@@ -13,6 +13,7 @@ import Testing
 struct MultiOutputModelFunctionTests {
     // MARK: - Error surface (no asset needed)
 
+    @available(macOS 27, iOS 27, *)
     @Test("expectedSingleOutput description lists all output names and points at predictAllOutputs")
     func expectedSingleOutputDescription() {
         let err = CoreAIDiffusionError.expectedSingleOutput(got: ["hidden_embeds", "pooled_outputs"])
@@ -28,6 +29,7 @@ struct MultiOutputModelFunctionTests {
     @Test(
         "CLIP-L asset reports 2 outputs (hidden + pooled) via predictAllOutputs",
         .enabled(if: Self.clipLAssetURL() != nil))
+    @available(macOS 27, iOS 27, *)
     func clipLMultiOutput() async throws {
         guard let url = Self.clipLAssetURL() else { return }
         let fn = CoreAIDiffusionModelFunction(modelURL: url)
@@ -62,6 +64,7 @@ struct MultiOutputModelFunctionTests {
     @Test(
         "predict(inputs:) throws expectedSingleOutput for a CLIP-L asset",
         .enabled(if: Self.clipLAssetURL() != nil))
+    @available(macOS 27, iOS 27, *)
     func predictRejectsMultiOutputAsset() async throws {
         guard let url = Self.clipLAssetURL() else { return }
         let fn = CoreAIDiffusionModelFunction(modelURL: url)
@@ -86,6 +89,7 @@ struct MultiOutputModelFunctionTests {
     @Test(
         "CoreAITextEncoder populates pooledOutput for a CLIP-L asset",
         .enabled(if: Self.clipLAssetURL() != nil))
+    @available(macOS 27, iOS 27, *)
     func textEncoderPooledOutputPresent() async throws {
         guard let url = Self.clipLAssetURL() else { return }
         let fn = CoreAIDiffusionModelFunction(modelURL: url)

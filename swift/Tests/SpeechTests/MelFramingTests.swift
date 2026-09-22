@@ -243,6 +243,7 @@ struct MelFramingGeometryTests {
 
 @Suite("Encoder frame mapping")
 struct EncoderFrameMappingTests {
+    @available(macOS 27, iOS 27, *)
     @Test("Layout determines the encoder input shape")
     func layoutDeterminesShape() {
         #expect(
@@ -253,6 +254,7 @@ struct EncoderFrameMappingTests {
                 == [1, 101, 128])
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("Dynamic exports count every real-audio frame, excluding the trailing zero frame")
     func dynamicExcludesOnlyThePaddedFrame() {
         // 16 000 samples = 100 real mel frames; the dynamic path appends one zero frame to
@@ -265,6 +267,7 @@ struct EncoderFrameMappingTests {
                 pcmCount: 0, tEnc: 5, config: .parakeet, subsamplingFactor: 8) == 0)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("A static window's padded tail is excluded exactly")
     func staticExcludesPaddingExactly() {
         // Whisper: 1000 of 3000 mel frames are real, subsampling 2 -> (1000-1)/2+1 = 500.
@@ -277,6 +280,7 @@ struct EncoderFrameMappingTests {
     /// low for ~25% of audio lengths against the shipped 21 s geometry, clipping a trailing
     /// token. Nine real mel frames subsample to 2 (9 -> 5 -> 3 -> 2), where the ratio
     /// 9/2101 x 263 rounds to 1.
+    @available(macOS 27, iOS 27, *)
     @Test("The boundary frame is derived, not rounded")
     func boundaryFrameIsExact() {
         let config = MelConfig.parakeet.withNFrames(2_101)
@@ -289,6 +293,7 @@ struct EncoderFrameMappingTests {
                 pcmCount: 743 * 160, tEnc: 263, config: config, subsamplingFactor: 8) == 93)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("The valid count never exceeds the encoder's own length")
     func validCountIsClamped() {
         let config = MelConfig.parakeet.withNFrames(100)
@@ -300,6 +305,7 @@ struct EncoderFrameMappingTests {
 
     /// Regression: the static-encoder path rebuilt `MelConfig` field by field and omitted
     /// `windowPeriodicity`, silently taking the initializer default.
+    @available(macOS 27, iOS 27, *)
     @Test("A static mel config differs from the preset only in nFrames")
     func staticConfigDiffersOnlyInFrameCount() {
         let derived = SpeechRecognitionBundle.melConfig(forEncoderTimeDim: 1_500)
@@ -318,6 +324,7 @@ struct EncoderFrameMappingTests {
         #expect(derived.melScale == preset.melScale)
     }
 
+    @available(macOS 27, iOS 27, *)
     @Test("A dynamic encoder dimension leaves nFrames nil", arguments: [-1, 0])
     func dynamicEncoderDimLeavesFramesNil(dim: Int) {
         #expect(SpeechRecognitionBundle.melConfig(forEncoderTimeDim: dim).nFrames == nil)

@@ -11,6 +11,7 @@ import CoreAIShared
 /// Standard input handler for text LLMs: `input_ids` (Int32) + `position_ids` (Int32).
 ///
 /// Pre-allocates the `input_ids` NDArray and reuses it when batch size is unchanged.
+@available(macOS 27, iOS 27, *)
 public struct TokenInputHandler: SyncInputHandler {
     public let inputNames: [String]
 
@@ -66,6 +67,7 @@ public struct TokenInputHandler: SyncInputHandler {
 /// Wraps a base input handler and appends model-specific extra inputs.
 ///
 /// Use for any input that needs per-step computation beyond standard token/position IDs.
+@available(macOS 27, iOS 27, *)
 public struct CompositeInputHandler<Base: SyncInputHandler>: SyncInputHandler {
     public var inputNames: [String] {
         base.inputNames + extras.map(\.name)
