@@ -7,7 +7,7 @@
 > project go to [`apple/coreai-models`](https://github.com/apple/coreai-models).
 >
 > **What this branch is.** Upstream `main` through #207 (2026-08-28) plus the zoo patches,
-> on branch `zoo-0.4` / tag `0.2.5-zoo`. Everything not listed below is byte-for-byte upstream.
+> on branch `zoo-0.4` / tag `0.2.7-zoo`. Everything not listed below is byte-for-byte upstream.
 >
 > - **Community model ports** under `python/src/coreai_models/models/` — files marked
 >   `Community port — NOT an Apple model` (ternary/1-bit, speech, OCR, MoE, MLA and hybrid
@@ -17,10 +17,23 @@
 >   upstream as apple/coreai-models#212), discovers a static-chunk `prefill` function in
 >   multifunction bundles, supports per-token inputs, and caps iOS dynamic-KV capacity at 1024
 >   (guard for apple/coreai-models#124).
+> - **Sequential engine**: checkpoint / restore of a hybrid model's recurrent state
+>   (`InferenceEngine.checkpoint()`). CoreAIKit's typed decisions checkpoint after a state's
+>   prompt prefix, and each later question on that state restores it instead of replaying the
+>   prompt from the first token: 4.4–5.9× per decision on three hybrid decision models on an
+>   M4 Max, every answer bit-identical to a full replay. Only the fixed-shape recurrent states
+>   are copied (10 MB, under 1 ms), not the KV cache.
 > - **Export**: `build_macos_export_spec` / `export_core()` shims for the hybrid ports on top
 >   of upstream's export contract, plus multifunction export.
 >
-> **Tags.** Use `0.2.5-zoo` or later, `0.2.6-zoo` if your package declares a floor below 27.
+> **Tags.** Use `0.2.5-zoo` or later, `0.2.6-zoo` or later if your package declares a floor below
+> 27. `0.2.7-zoo` adds the sequential engine's checkpoint above (`checkpoint()`,
+> `discardCheckpoint()` and `supportsCheckpoint` on `InferenceEngine`, no-ops by default): a
+> `reset(to:)` at or past the checkpoint, or a prompt that keeps its prefix, restores the recurrent
+> state instead of a full reset and replay. Per decision, eight questions on one state,
+> checkpointed vs every prompt from scratch: 186 vs 825 ms (`decider-0.8b`), 120 vs 696 ms
+> (`openthai-systemone`), 220 vs 1,297 ms (`qwen3.5-2b-decision`) on an M4 Max, 2026-09-24; iOS
+> not yet measured. The pipelined engine is unchanged.
 > `0.2.6-zoo` declares a macOS 26 / iOS 26 floor with `@available(macOS 27, iOS 27, *)` on
 > everything that touches Core AI, so packages with a lower floor can depend on it (see
 > Requirements); nothing runs below 27. `0.2.5-zoo` stops the engine at a stop sequence instead of
