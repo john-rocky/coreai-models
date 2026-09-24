@@ -21,7 +21,9 @@ final class RepetitionPenaltyGPUState: @unchecked Sendable {
     let penaltyBuffers: [MTLBuffer]
     let vocabSize: Int
     let pipelineDepth: Int
+    #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
     let penalty: Float16
+    #endif
     let windowSize: Int
 
     private var ring: [Int32]
@@ -31,6 +33,7 @@ final class RepetitionPenaltyGPUState: @unchecked Sendable {
     private var dirtyTokens: [(added: [Int32], evicted: [Int32])]
 
     init(device: MTLDevice, vocabSize: Int, pipelineDepth: Int, penalty: Double, windowSize: Int?) throws {
+        #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
         self.vocabSize = vocabSize
         self.pipelineDepth = pipelineDepth
         self.penalty = Float16(penalty)
@@ -51,6 +54,9 @@ final class RepetitionPenaltyGPUState: @unchecked Sendable {
         self.penaltyBuffers = buffers
         self.ring = [Int32](repeating: -1, count: self.windowSize)
         self.dirtyTokens = Array(repeating: (added: [], evicted: []), count: pipelineDepth)
+        #else
+        fatalError("Float16 is not supported on this platform")
+        #endif
     }
 
     /// Get the penalty buffer for a given step after syncing pending changes.
@@ -58,6 +64,7 @@ final class RepetitionPenaltyGPUState: @unchecked Sendable {
     /// Called at encode time. The gate guarantees this slot's previous GPU read
     /// has completed, so writing to it is safe.
     func buffer(forStep step: Int) -> MTLBuffer {
+        #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
         let slot = step % pipelineDepth
         let buf = penaltyBuffers[slot]
         let ptr = buf.contents().assumingMemoryBound(to: Float16.self)
@@ -72,6 +79,9 @@ final class RepetitionPenaltyGPUState: @unchecked Sendable {
         dirtyTokens[slot] = (added: [], evicted: [])
 
         return buf
+        #else
+        fatalError("Float16 is not supported on this platform")
+        #endif
     }
 
     /// Record a newly generated token (CPU-side bookkeeping only).
@@ -110,12 +120,14 @@ final class RepetitionPenaltyGPUState: @unchecked Sendable {
 
     /// Reset all state (called on engine reset).
     func reset() {
+        #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
         for buf in penaltyBuffers {
             let ptr = buf.contents().assumingMemoryBound(to: Float16.self)
             for i in 0..<vocabSize {
                 ptr[i] = Float16(1.0)
             }
         }
+        #endif
         ring = [Int32](repeating: -1, count: windowSize)
         writeIndex = 0
         count = 0

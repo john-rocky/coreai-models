@@ -440,6 +440,7 @@ public final class CoreAISequentialVLMEngine: MultimodalInferenceEngine, @unchec
         let elementsPerFrame = tokensPerFrame * hiddenDim
 
         switch scalarType {
+        #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
         case .float16, .bfloat16:
             var destView = concatenated.mutableView(as: Float16.self)
             destView.withUnsafeMutablePointer { destPtr, _, _ in
@@ -449,6 +450,7 @@ public final class CoreAISequentialVLMEngine: MultimodalInferenceEngine, @unchec
                     }
                 }
             }
+        #endif
         case .float32:
             var destView = concatenated.mutableView(as: Float.self)
             destView.withUnsafeMutablePointer { destPtr, _, _ in
@@ -657,6 +659,7 @@ public final class CoreAISequentialVLMEngine: MultimodalInferenceEngine, @unchec
             throw InferenceRuntimeError.invalidInputType(
                 "scatterMerge only supports float16 embeddings; got \(imageEmbeddings.scalarType)")
         }
+        #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
         imageEmbeddings.view(as: Float16.self).withUnsafePointer { imgPtr, _, _ in
             let mutableView = merged.mutableView(as: Float16.self)
             mutableView.withUnsafeMutablePointer { mergedPtr, _, _ in
@@ -670,6 +673,9 @@ public final class CoreAISequentialVLMEngine: MultimodalInferenceEngine, @unchec
                 }
             }
         }
+        #else
+        fatalError("Float16 is not supported on this platform")
+        #endif
 
         return merged
     }

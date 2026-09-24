@@ -63,7 +63,9 @@ public final class FixedNDArrayState: SyncStateHandler {
         stateNames.map { name in
             let array = arrays[name]!
             switch array.scalarType {
+            #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
             case .float16, .bfloat16: return copyNDArrayBytes(array, as: Float16.self)
+            #endif
             case .float32: return copyNDArrayBytes(array, as: Float.self)
             default: preconditionFailure("Unsupported scalar type for state: \(array.scalarType)")
             }
@@ -75,7 +77,9 @@ public final class FixedNDArrayState: SyncStateHandler {
         precondition(snapshot.count == stateNames.count, "restore: snapshot of \(snapshot.count) states, have \(stateNames.count)")
         for (name, bytes) in zip(stateNames, snapshot) {
             switch arrays[name]!.scalarType {
+            #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
             case .float16, .bfloat16: writeNDArrayBytes(bytes, into: &arrays[name]!, as: Float16.self)
+            #endif
             case .float32: writeNDArrayBytes(bytes, into: &arrays[name]!, as: Float.self)
             default: preconditionFailure("Unsupported scalar type for state: \(arrays[name]!.scalarType)")
             }
@@ -183,6 +187,7 @@ public final class GrowingNDArrayState: SyncStateHandler {
         let dstBlockStride = dstShape[sequenceDim...].reduce(1, *)
 
         switch source.scalarType {
+        #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
         case .float16, .bfloat16:
             source.view(as: Float16.self).withUnsafePointer { srcPtr, _, _ in
                 var dstView = destination.mutableView(as: Float16.self)
@@ -193,6 +198,7 @@ public final class GrowingNDArrayState: SyncStateHandler {
                     }
                 }
             }
+        #endif
         case .float32:
             source.view(as: Float.self).withUnsafePointer { srcPtr, _, _ in
                 var dstView = destination.mutableView(as: Float.self)
@@ -215,11 +221,13 @@ public final class GrowingNDArrayState: SyncStateHandler {
 func zeroFillNDArray(_ array: inout NDArray) {
     let count = array.shape.reduce(1, *)
     switch array.scalarType {
+    #if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))
     case .float16, .bfloat16:
         var view = array.mutableView(as: Float16.self)
         view.withUnsafeMutablePointer { ptr, _, _ in
             memset(ptr, 0, count * MemoryLayout<Float16>.size)
         }
+    #endif
     case .float32:
         var view = array.mutableView(as: Float.self)
         view.withUnsafeMutablePointer { ptr, _, _ in

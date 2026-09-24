@@ -7,7 +7,7 @@
 > project go to [`apple/coreai-models`](https://github.com/apple/coreai-models).
 >
 > **What this branch is.** Upstream `main` through #207 (2026-08-28) plus the zoo patches,
-> on branch `zoo-0.4` / tag `0.2.7-zoo`. Everything not listed below is byte-for-byte upstream.
+> on branch `zoo-0.4` / tag `0.2.8-zoo`. Everything not listed below is byte-for-byte upstream.
 >
 > - **Community model ports** under `python/src/coreai_models/models/` — files marked
 >   `Community port — NOT an Apple model` (ternary/1-bit, speech, OCR, MoE, MLA and hybrid
@@ -26,8 +26,15 @@
 > - **Export**: `build_macos_export_spec` / `export_core()` shims for the hybrid ports on top
 >   of upstream's export contract, plus multifunction export.
 >
-> **Tags.** Use `0.2.5-zoo` or later, `0.2.6-zoo` or later if your package declares a floor below
-> 27. `0.2.7-zoo` adds the sequential engine's checkpoint above (`checkpoint()`,
+> **Tags.** Use `0.2.5-zoo` or later; in a macOS app, or if your package declares a floor below 27,
+> `0.2.8-zoo` or later. `0.2.8-zoo` builds for x86_64 macOS: since `0.2.6-zoo` lowered the floor to
+> macOS 26, a Release (universal) build of a macOS app compiles this package for x86_64 too, where
+> `Float16` is unavailable, and three upstream files had no x86_64 guard (`RepetitionPenaltyGPUState`,
+> `CoreAISequentialVLMEngine`, `StateHandler+NDArray`), so the build failed. They now take the guard
+> upstream's other Float16 code uses,
+> `#if !((os(macOS) || targetEnvironment(macCatalyst)) && arch(x86_64))`; the arm64 code is
+> unchanged (CoreAIKit's `decider-0.8b` fixture reads bit-identical to `0.2.7-zoo`, 44 of 44 rows).
+> `0.2.7-zoo` adds the sequential engine's checkpoint above (`checkpoint()`,
 > `discardCheckpoint()` and `supportsCheckpoint` on `InferenceEngine`, no-ops by default): a
 > `reset(to:)` at or past the checkpoint, or a prompt that keeps its prefix, restores the recurrent
 > state instead of a full reset and replay. Per decision, eight questions on one state,
