@@ -57,6 +57,30 @@ public final class FixedNDArrayState: SyncStateHandler {
     public func truncate(to tokenCount: Int) {
         preconditionFailure("truncate(to:) called on non-truncatable FixedNDArrayState")
     }
+
+    /// A copy of every state's bytes, in `stateNames` order — what `restore(_:)` writes back.
+    public func snapshot() -> [[UInt8]] {
+        stateNames.map { name in
+            let array = arrays[name]!
+            switch array.scalarType {
+            case .float16, .bfloat16: return copyNDArrayBytes(array, as: Float16.self)
+            case .float32: return copyNDArrayBytes(array, as: Float.self)
+            default: preconditionFailure("Unsupported scalar type for state: \(array.scalarType)")
+            }
+        }
+    }
+
+    /// Writes a `snapshot()` of this handler back in place.
+    public func restore(_ snapshot: [[UInt8]]) {
+        precondition(snapshot.count == stateNames.count, "restore: snapshot of \(snapshot.count) states, have \(stateNames.count)")
+        for (name, bytes) in zip(stateNames, snapshot) {
+            switch arrays[name]!.scalarType {
+            case .float16, .bfloat16: writeNDArrayBytes(bytes, into: &arrays[name]!, as: Float16.self)
+            case .float32: writeNDArrayBytes(bytes, into: &arrays[name]!, as: Float.self)
+            default: preconditionFailure("Unsupported scalar type for state: \(arrays[name]!.scalarType)")
+            }
+        }
+    }
 }
 
 // MARK: - Growing NDArray State
@@ -203,5 +227,35 @@ func zeroFillNDArray(_ array: inout NDArray) {
         }
     default:
         preconditionFailure("Unsupported scalar type for state: \(array.scalarType)")
+    }
+}
+
+/// Elements from the first to one past the last that `shape` and `strides` address — the
+/// whole backing storage, padding included.
+private func storageExtent(shape: Span<Int>, strides: Span<Int>) -> Int {
+    var last = 0
+    for d in 0..<shape.count {
+        guard shape[d] > 0 else { return 0 }
+        last += (shape[d] - 1) * strides[d]
+    }
+    return last + 1
+}
+
+@available(macOS 27, iOS 27, *)
+private func copyNDArrayBytes<T: BitwiseCopyable>(_ array: NDArray, as type: T.Type) -> [UInt8] {
+    array.view(as: type).withUnsafePointer { ptr, shape, strides in
+        let byteCount = storageExtent(shape: shape, strides: strides) * MemoryLayout<T>.stride
+        return Array(UnsafeRawBufferPointer(start: ptr, count: byteCount))
+    }
+}
+
+@available(macOS 27, iOS 27, *)
+private func writeNDArrayBytes<T: BitwiseCopyable>(_ bytes: [UInt8], into array: inout NDArray, as type: T.Type) {
+    var view = array.mutableView(as: type)
+    view.withUnsafeMutablePointer { ptr, shape, strides in
+        let byteCount = storageExtent(shape: shape, strides: strides) * MemoryLayout<T>.stride
+        precondition(bytes.count == byteCount, "restore: \(bytes.count) bytes for a \(byteCount)-byte state")
+        guard byteCount > 0 else { return }
+        bytes.withUnsafeBytes { UnsafeMutableRawPointer(ptr).copyMemory(from: $0.baseAddress!, byteCount: byteCount) }
     }
 }

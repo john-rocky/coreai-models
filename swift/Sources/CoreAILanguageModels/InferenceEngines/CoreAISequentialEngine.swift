@@ -74,6 +74,9 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
     private var history = TokenHistory()
     public private(set) var lastPrefixHitCount: Int = 0
 
+    // Recurrent-state checkpoint (hybrid models) — see checkpoint()
+    private var savedCheckpoint: Checkpoint?
+
     // Track in-flight generation via token (replaces simple bool lock)
     private let _activeToken = Mutex<GenerationToken?>(nil)
 
@@ -355,18 +358,29 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
         }
 
         // Implicit prefix caching: resolve input against history.
-        // For hybrid models with recurrent states, we must full-reset on any
-        // rewind because recurrent state summarizes the whole prefix and cannot
-        // be truncated by moving a KV cursor. Future: checkpoint/restore.
+        // For hybrid models with recurrent states, a rewind cannot move a KV
+        // cursor: recurrent state summarizes the whole prefix. It returns to the
+        // checkpoint when the input keeps it, and full-resets otherwise.
         if history.count > 0 {
             let (commonPrefix, _) = history.resolve(input: input)
             if hasNonTruncatableStates {
                 // Hybrid model: recurrent state can't be partially rewound.
-                // Full reset and replay the entire prompt.
                 if commonPrefix < history.count || processedTokenCount >= input.count {
-                    internalReset(to: 0)
+                    if let checkpoint = savedCheckpoint, commonPrefix >= checkpoint.tokenIndex,
+                        checkpoint.tokenIndex < input.count
+                    {
+                        // Restore the checkpoint and replay only what follows it.
+                        restore(checkpoint)
+                        lastPrefixHitCount = checkpoint.tokenIndex
+                    } else {
+                        // Full reset and replay the entire prompt.
+                        internalReset(to: 0)
+                        lastPrefixHitCount = 0
+                    }
+                } else {
+                    // Pure extension: the state already holds the whole history.
+                    lastPrefixHitCount = commonPrefix
                 }
-                lastPrefixHitCount = 0
             } else if commonPrefix < input.count && commonPrefix < history.count {
                 // Divergence: input differs from history. Full reset needed.
                 internalReset(to: 0)
@@ -418,9 +432,21 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
             tokenIndex >= 0 && tokenIndex <= processedTokenCount,
             "reset(to: \(tokenIndex)) out of range [0, \(processedTokenCount)]")
         if tokenIndex != 0 && hasNonTruncatableStates {
-            throw InferenceRuntimeError.invalidState(
-                "Partial reset is not supported for hybrid models with recurrent state. "
-                    + "Use reset(to: 0) and replay the prefix.")
+            // Recurrent state cannot be cut back: it stays where it is when everything is
+            // kept, or returns to the checkpoint when the kept prefix covers it.
+            guard tokenIndex == processedTokenCount || tokenIndex >= (savedCheckpoint?.tokenIndex ?? .max) else {
+                throw InferenceRuntimeError.invalidState(
+                    "Partial reset is not supported for hybrid models with recurrent state. "
+                        + "Use reset(to: 0) and replay the prefix.")
+            }
+            _activeToken.withLock {
+                $0?.cancel()
+                $0 = nil
+            }
+            if tokenIndex < processedTokenCount, let checkpoint = savedCheckpoint {
+                restore(checkpoint)
+            }
+            return
         }
         _activeToken.withLock {
             $0?.cancel()
@@ -438,6 +464,7 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
             history.clear()
             kvCache.reset()
             additionalStates?.reset()
+            savedCheckpoint = nil
         } else {
             processedTokenCount = tokenIndex
             history.truncate(to: tokenIndex)
@@ -449,6 +476,73 @@ public final class CoreAISequentialEngine: InferenceEngine, @unchecked Sendable 
         let cleanupSpan = InstrumentsProfiler.beginCleanup(engine: "CoreAIClean")
         CLILogger.log("CoreAI clean engine cleanup complete")
         cleanupSpan.end()
+    }
+
+    // MARK: - Checkpoint
+
+    /// The recurrent state after `tokenIndex` tokens, kept so a rewind can return to it.
+    private struct Checkpoint {
+        let tokenIndex: Int
+        /// The first `tokenIndex` tokens of the history.
+        let tokens: [Int32]
+        /// One snapshot per handler in `checkpointedStates`, in order.
+        let snapshots: [[[UInt8]]]
+    }
+
+    /// The states a checkpoint copies: the persistent fixed-shape ones, wherever the factory
+    /// put them. The KV cache is not copied — after a restore every position from the
+    /// checkpoint on is rewritten before a later step reads it, as in an attention model's
+    /// rewind: each step's position_ids run 0..<processedTokenCount + batch, so the first
+    /// step after a restore writes position tokenIndex.
+    private var checkpointedStates: [FixedNDArrayState] {
+        if let additionalStates { return [additionalStates] }
+        // Every state fixed-shape: the factory keeps them all in the KV slot.
+        if hasNonTruncatableStates, let fixed = kvCache as? FixedNDArrayState { return [fixed] }
+        return []
+    }
+
+    public var supportsCheckpoint: Bool { hasNonTruncatableStates }
+
+    public func checkpoint() async throws {
+        guard hasNonTruncatableStates else { return }
+        // As in reset(to:), a generation still open is cancelled: its next step would move
+        // the state past the checkpoint.
+        _activeToken.withLock {
+            $0?.cancel()
+            $0 = nil
+        }
+        guard processedTokenCount > 0, history.count >= processedTokenCount else {
+            savedCheckpoint = nil
+            return
+        }
+        let start = ContinuousClock.now
+        let snapshots = checkpointedStates.map { $0.snapshot() }
+        savedCheckpoint = Checkpoint(
+            tokenIndex: processedTokenCount,
+            tokens: Array(history.tokens.prefix(processedTokenCount)),
+            snapshots: snapshots)
+        let byteCount = snapshots.joined().reduce(0) { $0 + $1.count }
+        CLILogger.log(
+            "Checkpoint at \(processedTokenCount) tokens: \(byteCount) bytes of recurrent state copied in "
+                + "\(ContinuousClock.now - start)")
+    }
+
+    public func discardCheckpoint() async {
+        savedCheckpoint = nil
+    }
+
+    /// Returns the engine to `checkpoint`: its states written back, the cursor and the
+    /// history at its token index.
+    private func restore(_ checkpoint: Checkpoint) {
+        let start = ContinuousClock.now
+        for (state, snapshot) in zip(checkpointedStates, checkpoint.snapshots) {
+            state.restore(snapshot)
+        }
+        processedTokenCount = checkpoint.tokenIndex
+        history.clear()
+        history.append(contentsOf: checkpoint.tokens[...])
+        CLILogger.log(
+            "Restored the checkpoint at \(checkpoint.tokenIndex) tokens in \(ContinuousClock.now - start)")
     }
 
     // MARK: - Helpers

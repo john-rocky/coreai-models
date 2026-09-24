@@ -120,6 +120,23 @@ public protocol InferenceEngine: Sendable {
     /// Run dummy inference to trigger kernel compilation.
     func warmup(queryLength: Int, sampling: SamplingConfiguration?) async throws
 
+    // MARK: - Checkpoint
+
+    /// Whether `checkpoint()` saves anything. True on an engine whose recurrent states
+    /// (hybrid GDN/SSM) cannot be rewound by moving a cursor; false where a rewind is
+    /// already free.
+    var supportsCheckpoint: Bool { get }
+
+    /// Save the state after the `processedTokenCount` tokens processed so far. Until it is
+    /// discarded, `reset(to:)` at or past that position, and `generate()` on an input that
+    /// keeps it as a prefix, return to it instead of replaying from position 0. One
+    /// checkpoint per engine: a new one replaces it; a full reset, or a rewind or divergence
+    /// before it, discards it.
+    func checkpoint() async throws
+
+    /// Drop the checkpoint, if any.
+    func discardCheckpoint() async
+
     // MARK: - Cancellation
 
     /// Whether the engine has an active generation in progress.
@@ -210,6 +227,17 @@ extension InferenceEngine {
 extension InferenceEngine {
     /// Default: processedTokenCount is 0 (engine hasn't processed anything).
     public var processedTokenCount: Int { 0 }
+}
+
+extension InferenceEngine {
+    /// Default: no checkpoint — nothing to save where a rewind is free.
+    public var supportsCheckpoint: Bool { false }
+
+    /// Default no-op.
+    public func checkpoint() async throws {}
+
+    /// Default no-op.
+    public func discardCheckpoint() async {}
 }
 
 extension InferenceEngine {
