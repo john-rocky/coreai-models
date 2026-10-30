@@ -29,6 +29,11 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
     /// Keys are state names from the model descriptor, values are StateKind.
     public let states: [String: StateKind]?
 
+    /// `true` if the bundle's static-chunk `prefill` function also takes a chunk padded at its
+    /// end (the padded query rows carry position id -1), so the pipelined engine can feed a
+    /// prompt's last partial chunk as one call. Defaults to `false` when omitted.
+    public let prefillPadTail: Bool
+
     public init(
         tokenizer: String,
         vocabSize: Int,
@@ -36,7 +41,8 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
         embeddedTokenizer: Bool = true,
         functionMap: FunctionMap? = nil,
         vision: VisionConfig? = nil,
-        states: [String: StateKind]? = nil
+        states: [String: StateKind]? = nil,
+        prefillPadTail: Bool = false
     ) {
         self.tokenizer = tokenizer
         self.vocabSize = vocabSize
@@ -45,6 +51,7 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
         self.functionMap = functionMap
         self.vision = vision
         self.states = states
+        self.prefillPadTail = prefillPadTail
     }
 
     enum CodingKeys: String, CodingKey {
@@ -55,6 +62,7 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
         case functionMap = "function_map"
         case vision
         case states
+        case prefillPadTail = "prefill_pad_tail"
     }
 
     public init(from decoder: Swift.Decoder) throws {
@@ -66,6 +74,7 @@ public struct LanguageConfig: Codable, Sendable, Equatable {
         self.functionMap = try c.decodeIfPresent(FunctionMap.self, forKey: .functionMap)
         self.vision = try c.decodeIfPresent(VisionConfig.self, forKey: .vision)
         self.states = try c.decodeIfPresent([String: StateKind].self, forKey: .states)
+        self.prefillPadTail = try c.decodeIfPresent(Bool.self, forKey: .prefillPadTail) ?? false
     }
 
     // MARK: - Additional Stop Tokens

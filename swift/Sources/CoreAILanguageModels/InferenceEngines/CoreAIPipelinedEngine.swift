@@ -27,6 +27,16 @@ private func milliseconds(since start: ContinuousClock.Instant) -> Double {
 /// the same memory.
 private let pipelineDepth = 3
 private let averageExpectedPromptSize = 256
+/// A bundle whose static-chunk "prefill" also takes a chunk padded at its end
+/// (`language.prefill_pad_tail`) feeds a prompt's last partial chunk of at least this many
+/// tokens as one padded call; a shorter tail goes S=1 through the main function, where a few
+/// steps cost less than one chunk call. `COREAI_PAD_TAIL=<n>` sets it, 0 turns padding off.
+private let defaultPadTailMinimum = 4
+#if os(iOS)
+/// iOS + dynamically-sized KV cache: the capacity cap of runCompletion's guard
+/// (apple/coreai-models#124).
+private let iosDynamicKVCapacityCap = 1024
+#endif
 private let temperatureTolerance: Double = 0.001
 
 /// MPSNDArray enforces 64-byte row-stride alignment on backing buffers.
@@ -482,6 +492,9 @@ final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable
     /// Testing only: chunks that rode the static-chunk "prefill" function since load.
     var prefillChunkCount: Int { engine.prefillChunkCount }
 
+    /// Testing only: of those, padded last chunks (bundles whose "prefill" takes one).
+    var paddedChunkCount: Int { engine.paddedChunkCount }
+
     /// Testing only: the raw float16 bits of the last prompt step's logits (the first generated
     /// token's), read once the generation and the GPU are done.
     func lastPromptLogitsBits() async -> [UInt16] {
@@ -660,6 +673,44 @@ private struct PipelinedCheckpoint {
     let snapshots: [Data]
 }
 
+/// How a prompt rides a static-chunk "prefill" function: full chunks, then the last partial
+/// chunk as one padded call or as S=1 steps on the main function, leaving the prompt's last
+/// token for the sampled step.
+struct ChunkedPrefillPlan: Equatable {
+    /// Full chunks of `chunkLength` tokens.
+    let fullChunks: Int
+    /// Real tokens of the padded last chunk; 0 = no padded chunk.
+    let paddedTokens: Int
+    /// S=1 steps on the main function after the chunks.
+    let singleSteps: Int
+
+    init(fullChunks: Int, paddedTokens: Int, singleSteps: Int) {
+        self.fullChunks = fullChunks
+        self.paddedTokens = paddedTokens
+        self.singleSteps = singleSteps
+    }
+
+    /// - Parameters:
+    ///   - tokenCount: the prompt tokens to feed, the sampled step's included.
+    ///   - start: the position of the first of them.
+    ///   - chunkLength: the "prefill" function's static query length.
+    ///   - padTailMinimum: the shortest tail fed as a padded chunk; nil = never.
+    ///   - capacity: the positions the KV cache holds. A padded chunk writes a whole chunk, so
+    ///     it needs room for one past its start; without it the tail goes S=1.
+    init(tokenCount: Int, start: Int, chunkLength: Int, padTailMinimum: Int?, capacity: Int) {
+        let fed = max(0, tokenCount - 1)
+        let full = fed / chunkLength
+        let tail = fed - full * chunkLength
+        if let minimum = padTailMinimum, tail > 0, tail >= minimum,
+            start + (full + 1) * chunkLength <= capacity
+        {
+            self.init(fullChunks: full, paddedTokens: tail, singleSteps: 0)
+        } else {
+            self.init(fullChunks: full, paddedTokens: 0, singleSteps: tail)
+        }
+    }
+}
+
 /// One-shot rendezvous between the sampler's GPU-completion callback (which learns the
 /// sampled token on a Metal callback thread) and the decode loop (which must know that token
 /// BEFORE it can gather per-token inputs for the next step). Either side may arrive first;
@@ -769,6 +820,12 @@ private struct EngineImpl: ~Copyable {
     let prefillPositionIdsBaseDesc: NDArrayDescriptor?
     let prefillLogitsBaseDesc: NDArrayDescriptor?
     let prefillLogitsBuffer: MTLBuffer?
+    // Shortest prompt tail fed as one padded "prefill" call; nil = the bundle's "prefill"
+    // takes no padded chunk, or padding is off (see ChunkedPrefillPlan).
+    let padTailMinimum: Int?
+    // Position ids of a padded chunk (-1 on the padded rows): its own buffer, as the shared
+    // cachePositionBuffers hold [0, 1, ...] for every other step.
+    var padPositionBuffer: MTLBuffer? = nil
 
     // Logits — reuses GrowingLogitsBuffer from TensorStorage+CoreAI.swift
     var logits: GrowingLogitsBuffer
@@ -790,6 +847,8 @@ private struct EngineImpl: ~Copyable {
     var checkpointTokenIndex: Int? { savedCheckpoint?.tokenIndex }
     // Full chunks encoded through the "prefill" function (testing counter)
     var prefillChunkCount = 0
+    // Of those, padded last chunks (testing counter)
+    var paddedChunkCount = 0
 
     // Backpressure gate — see PipelineGate doc-comment for the failure mode it prevents.
     // Capacity matches pipeline depth: {encode logits + sampler commit + optional KV-cache grow} in flight.
@@ -1120,6 +1179,17 @@ private struct EngineImpl: ~Copyable {
             CLILogger.log(
                 "Pipelined engine loaded 'prefill' function: static chunk S=\(chunkLen)")
         }
+        var padTailMinimumLocal: Int? = nil
+        if prefillFnLocal != nil, config.prefillPadTail {
+            padTailMinimumLocal = defaultPadTailMinimum
+            if let value = ProcessInfo.processInfo.environment["COREAI_PAD_TAIL"], let minimum = Int(value) {
+                padTailMinimumLocal = minimum > 0 ? minimum : nil
+            }
+            CLILogger.log(
+                padTailMinimumLocal.map {
+                    "Pipelined engine pads a prompt's last partial chunk of \($0)+ tokens on 'prefill'"
+                } ?? "Pipelined engine: padded 'prefill' chunks off (COREAI_PAD_TAIL=0)")
+        }
 
         guard let pipelineQueue = device.makeCommandQueue() else {
             throw InferenceRuntimeError.invalidState(
@@ -1162,6 +1232,7 @@ private struct EngineImpl: ~Copyable {
         self.prefillPositionIdsBaseDesc = prefillPosDescLocal
         self.prefillLogitsBaseDesc = prefillLogitsDescLocal
         self.prefillLogitsBuffer = prefillLogitsBufLocal
+        self.padTailMinimum = padTailMinimumLocal
         self.cachedSampler = nil
         self.cachedSamplerTemperature = nil
 
@@ -1609,7 +1680,6 @@ private struct EngineImpl: ~Copyable {
         // is exhausted. Repro + bisect: apple/coreai-models#124.
         #if os(iOS)
         if kvCache is GrowingKVCache {
-            let iosDynamicKVCapacityCap = 1024
             let budgetLeft = iosDynamicKVCapacityCap - processedTokenCount - prompt.count
             guard budgetLeft >= 1 else {
                 throw InferenceRuntimeError.contextLengthExceeded(
@@ -1625,9 +1695,22 @@ private struct EngineImpl: ~Copyable {
         }
         #endif
 
+        // A padded last chunk (padTailMinimum) writes the KV rows of a whole chunk past its
+        // start: rows past the prompt, which a later step rewrites before reading them. The
+        // pre-grow leaves room for them when the generation budget is smaller, though not past
+        // the iOS cap above (a tail that does not fit goes S=1, see ChunkedPrefillPlan).
+        #if os(iOS)
+        let padRoomCap =
+            kvCache is GrowingKVCache
+            ? iosDynamicKVCapacityCap - processedTokenCount - prompt.count : Int.max
+        #else
+        let padRoomCap = Int.max
+        #endif
+        let padRoom = padTailMinimum == nil ? 0 : min(prefillChunkLength, padRoomCap)
+
         // Pre-grow KV cache for prompt
         let promptCapacityNeeded = min(
-            processedTokenCount + prompt.count + totalMaxTokens, config.maxContextLength)
+            processedTokenCount + prompt.count + max(totalMaxTokens, padRoom), config.maxContextLength)
         if promptCapacityNeeded > kvCache.currentCapacity {
             do {
                 let queue = pipelineQueue
@@ -2048,15 +2131,25 @@ private struct EngineImpl: ~Copyable {
         var remainingTokens = tokens[...]
 
         // Static-chunk prefill function: full S=C chunks ride the "prefill"
-        // graph (its own static logits buffer), the tail runs as S=1 steps on
-        // the main graph, and exactly one token is left for the sampled step.
+        // graph (its own static logits buffer), the tail runs as one padded
+        // chunk (bundles whose "prefill" takes one) or as S=1 steps on the main
+        // graph, and exactly one token is left for the sampled step.
         if prefillFunction != nil {
             let chunkLength = prefillChunkLength
-            while remainingTokens.count - 1 >= chunkLength {
+            let plan = ChunkedPrefillPlan(
+                tokenCount: remainingTokens.count, start: processedTokenCount,
+                chunkLength: chunkLength, padTailMinimum: padTailMinimum,
+                capacity: min(kvCache.currentCapacity, config.maxContextLength))
+            for _ in 0..<plan.fullChunks {
                 try await _encodeChunk(tokens: Array(remainingTokens.prefix(chunkLength)))
                 remainingTokens = remainingTokens.dropFirst(chunkLength)
             }
-            while remainingTokens.count > 1 {
+            if plan.paddedTokens > 0 {
+                try await _encodeChunk(
+                    tokens: Array(remainingTokens.prefix(plan.paddedTokens)), paddedTo: chunkLength)
+                remainingTokens = remainingTokens.dropFirst(plan.paddedTokens)
+            }
+            for _ in 0..<plan.singleSteps {
                 try await _encodeChunk(tokens: [remainingTokens.first!])
                 remainingTokens = remainingTokens.dropFirst()
             }
@@ -2076,8 +2169,13 @@ private struct EngineImpl: ~Copyable {
         return remainingTokens
     }
 
-    private mutating func _encodeChunk(tokens: [Int32]) async throws {
-        let queryLength = tokens.count
+    /// `paddedTo`: the tokens fed as a static `paddedTo`-long query, the padded rows carrying
+    /// token 0 and position id -1 (a "prefill" that takes a padded chunk). The cursor moves by
+    /// the real tokens only: the KV rows the pads write lie past it and are written again
+    /// before any step reads them.
+    private mutating func _encodeChunk(tokens: [Int32], paddedTo: Int? = nil) async throws {
+        let realCount = tokens.count
+        let queryLength = paddedTo ?? realCount
         let currentStep = processedTokenCount
         if !perTokenInputs.isEmpty {
             try requireSingleTokenStep(queryLength)
@@ -2107,9 +2205,30 @@ private struct EngineImpl: ~Copyable {
         for (i, token) in tokens.enumerated() {
             ptr[processedTokenCount + i] = token
         }
+        for i in realCount..<queryLength {
+            ptr[processedTokenCount + i] = 0
+        }
 
-        let cachePosBuffer = cachePositionBuffers[step % pipelineDepth]
+        var cachePosBuffer = cachePositionBuffers[step % pipelineDepth]
         let posLength = processedTokenCount + queryLength
+        if queryLength > realCount {
+            if padPositionBuffer == nil {
+                padPositionBuffer = device.makeBuffer(
+                    length: config.maxContextLength * MemoryLayout<Int32>.size, options: .storageModeShared)
+            }
+            guard let padBuffer = padPositionBuffer else {
+                throw InferenceRuntimeError.bufferAllocationFailed("padded-chunk positions")
+            }
+            let positions = padBuffer.contents().bindMemory(to: Int32.self, capacity: posLength)
+            for i in 0..<posLength {
+                positions[i] = i < processedTokenCount + realCount ? Int32(i) : -1
+            }
+            cachePosBuffer = padBuffer
+            paddedChunkCount += 1
+            CLILogger.log(
+                "Pipelined engine: padded last chunk at \(processedTokenCount): \(realCount) tokens + "
+                    + "\(queryLength - realCount) pads on 'prefill'")
+        }
 
         // Build async values and encode
         let tokenShape = [1, queryLength]
@@ -2166,7 +2285,7 @@ private struct EngineImpl: ~Copyable {
             logitsShape: logitsShape, logitsStrides: logitsStrides,
             computeStream: computeStream)
 
-        processedTokenCount += queryLength
+        processedTokenCount += realCount
         step += 1
         InstrumentsProfiler.endCustomInterval(name: "CoreAIPipelinedChunk", signpostID: chunkID)
     }

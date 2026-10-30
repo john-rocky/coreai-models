@@ -164,5 +164,32 @@ struct UnifiedConfigHandlerTests {
         #expect(decoded.name == original.name)
         #expect(decoded.inputMode == original.inputMode)
         #expect(decoded.source?.modelDefinition == original.source?.modelDefinition)
+        #expect(decoded.prefillPadTail == false)
+    }
+
+    @Test("prefill_pad_tail survives the round-trip EngineFactory parses; omitted = false")
+    func prefillPadTailRoundtrip() throws {
+        let original = ModelConfig(
+            name: "padded",
+            tokenizer: "test/tokenizer",
+            vocabSize: 32000,
+            maxContextLength: 2048,
+            serializedModel: ["model.aimodel"],
+            function: "main",
+            prefillPadTail: true
+        )
+        let decoded = try ModelConfig(parsing: try JSONEncoder().encode(original))
+        #expect(decoded.prefillPadTail == true)
+
+        let json = """
+            {
+                "name": "plain",
+                "tokenizer": "test/tokenizer",
+                "vocab_size": 32000,
+                "max_context_length": 2048,
+                "serialized_model": ["model.aimodel"]
+            }
+            """
+        #expect(try ModelConfig(parsing: Data(json.utf8)).prefillPadTail == false)
     }
 }

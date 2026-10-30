@@ -84,7 +84,8 @@ public struct CoreAIRunner {
                 modelDefinition: .pyTorch
             ),
             serializedModel: [modelAsset],
-            function: functionName
+            function: functionName,
+            prefillPadTail: bundle.language.prefillPadTail
         )
     }
 }

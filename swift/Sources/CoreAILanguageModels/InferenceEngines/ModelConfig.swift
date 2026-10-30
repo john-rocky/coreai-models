@@ -50,6 +50,7 @@ public struct ModelSource: Codable, Sendable {
 /// |-----------------------|----------------------|--------------|----------------|-------------------------------------|
 /// | `input_mode`          | ``inputMode``         | ``InputMode``| `nil`          | Input initialization mode           |
 /// | `model_definition`    | (on source)           | ``ModelSource/ModelDefinition`` | `.pyTorch` | Model origin framework |
+/// | `prefill_pad_tail`    | ``prefillPadTail``    | `Bool`       | `false`        | `prefill` takes a chunk padded at its end (pipelined) |
 ///
 /// Use ``resolvedModelDefinition`` for safe access with defaults.
 public struct ModelConfig: InferenceConfiguration, Codable, Sendable {
@@ -65,6 +66,10 @@ public struct ModelConfig: InferenceConfiguration, Codable, Sendable {
     // Static-shape-specific (optional)
     var inputMode: InputMode?
 
+    // Pipelined-specific (optional): the static-chunk "prefill" function also takes a chunk
+    // padded at its end (`language.prefill_pad_tail` in the bundle's metadata.json).
+    var prefillPadTail: Bool
+
     public enum InputMode: String, Codable, Sendable {
         case random
         case allZeros = "all-zeros"
@@ -78,7 +83,8 @@ public struct ModelConfig: InferenceConfiguration, Codable, Sendable {
         source: ModelSource? = nil,
         serializedModel: [String],
         function: String,
-        inputMode: InputMode? = nil
+        inputMode: InputMode? = nil,
+        prefillPadTail: Bool = false
     ) {
         self.name = name
         self.tokenizer = tokenizer
@@ -88,6 +94,7 @@ public struct ModelConfig: InferenceConfiguration, Codable, Sendable {
         self.serializedModel = serializedModel
         self.function = function
         self.inputMode = inputMode
+        self.prefillPadTail = prefillPadTail
     }
 
     enum CodingKeys: String, CodingKey {
@@ -99,6 +106,7 @@ public struct ModelConfig: InferenceConfiguration, Codable, Sendable {
         case serializedModel = "serialized_model"
         case function
         case inputMode = "input_mode"
+        case prefillPadTail = "prefill_pad_tail"
     }
 
     public init(from decoder: Decoder) throws {
@@ -111,6 +119,7 @@ public struct ModelConfig: InferenceConfiguration, Codable, Sendable {
         self.serializedModel = try c.decode([String].self, forKey: .serializedModel)
         self.function = try c.decodeIfPresent(String.self, forKey: .function) ?? "main"
         self.inputMode = try c.decodeIfPresent(InputMode.self, forKey: .inputMode)
+        self.prefillPadTail = try c.decodeIfPresent(Bool.self, forKey: .prefillPadTail) ?? false
     }
 }
 

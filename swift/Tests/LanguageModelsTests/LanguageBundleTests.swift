@@ -120,6 +120,29 @@ struct LanguageBundleTests {
             """)
         let bundle = try LanguageBundle(at: url)
         #expect(bundle.language.functionMap == nil)
+        #expect(bundle.language.prefillPadTail == false)  // default
+    }
+
+    @Test("prefill_pad_tail decodes (a prefill that takes a chunk padded at its end)")
+    func prefillPadTail() throws {
+        let url = try Self.tempBundle(
+            """
+            {
+              "metadata_version": "0.2",
+              "kind": "llm",
+              "name": "padded",
+              "assets": { "main": "model.aimodel" },
+              "language": {
+                "tokenizer": "x/y",
+                "vocab_size": 100,
+                "max_context_length": 512,
+                "function_map": { "main": ["main", "prefill"] },
+                "prefill_pad_tail": true
+              }
+            }
+            """)
+        let bundle = try LanguageBundle(at: url)
+        #expect(bundle.language.prefillPadTail == true)
     }
 
     @Test("user_data round-trips as [String: String]")

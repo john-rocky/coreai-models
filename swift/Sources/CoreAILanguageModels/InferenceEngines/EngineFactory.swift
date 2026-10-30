@@ -80,6 +80,7 @@ public struct EngineFactory: Sendable {
         let tokenizer: String
         let function: String
         let modelDefinition: ModelSource.ModelDefinition
+        let prefillPadTail: Bool
     }
 
     /// Parses config data using the unified config handler.
@@ -91,7 +92,8 @@ public struct EngineFactory: Sendable {
             maxContextLength: config.maxContextLength,
             tokenizer: config.tokenizer,
             function: config.function,
-            modelDefinition: config.resolvedModelDefinition
+            modelDefinition: config.resolvedModelDefinition,
+            prefillPadTail: config.prefillPadTail
         )
     }
 
@@ -197,7 +199,8 @@ public struct EngineFactory: Sendable {
                 modelDefinition: config.modelDefinition
             ),
             serializedModel: [modelURL.lastPathComponent],
-            function: config.function
+            function: config.function,
+            prefillPadTail: config.prefillPadTail
         )
 
         switch variant {
