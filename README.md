@@ -7,7 +7,7 @@
 > project go to [`apple/coreai-models`](https://github.com/apple/coreai-models).
 >
 > **What this branch is.** Upstream `main` through #207 (2026-08-28) plus the zoo patches,
-> on branch `zoo-0.4` / tag `0.2.8-zoo`. Everything not listed below is byte-for-byte upstream.
+> on branch `zoo-0.4` / tag `0.2.9-zoo`. Everything not listed below is byte-for-byte upstream.
 >
 > - **Community model ports** under `python/src/coreai_models/models/` — files marked
 >   `Community port — NOT an Apple model` (ternary/1-bit, speech, OCR, MoE, MLA and hybrid
@@ -16,7 +16,9 @@
 > - **Pipelined engine**: loads decode-only S=1 bundles (`logitsSeqIsStatic` guard, reported
 >   upstream as apple/coreai-models#212), discovers a static-chunk `prefill` function in
 >   multifunction bundles, supports per-token inputs, and caps iOS dynamic-KV capacity at 1024
->   (guard for apple/coreai-models#124).
+>   (guard for apple/coreai-models#124). It checkpoints a hybrid model's recurrent state as the
+>   sequential engine does, and feeds a prompt's last partial chunk as one padded `prefill` call
+>   when the bundle declares that its `prefill` takes one (`"prefill_pad_tail": true`).
 > - **Sequential engine**: checkpoint / restore of a hybrid model's recurrent state
 >   (`InferenceEngine.checkpoint()`). CoreAIKit's typed decisions checkpoint after a state's
 >   prompt prefix, and each later question on that state restores it instead of replaying the
@@ -27,7 +29,14 @@
 >   of upstream's export contract, plus multifunction export.
 >
 > **Tags.** Use `0.2.5-zoo` or later; in a macOS app, or if your package declares a floor below 27,
-> `0.2.8-zoo` or later. `0.2.8-zoo` builds for x86_64 macOS: since `0.2.6-zoo` lowered the floor to
+> `0.2.8-zoo` or later. `0.2.9-zoo` adds two things to the pipelined engine. It checkpoints a hybrid
+> model's recurrent state, through `checkpoint()` as in the sequential engine and through
+> `InferenceOptions.checkpointAfter` inside a generate at no extra call, so CoreAIKit's chats resume
+> each turn from the previous prompt's last message instead of re-prefilling the history (turn 2 of a
+> conversation about a 1,584-token document on LFM3-1.7B: 837.8 → 38.6 ms to the first token on an
+> M4 Max). And a bundle that declares `"prefill_pad_tail": true` gets a prompt's last partial chunk as
+> one padded `prefill` call (LFM3-1.7B `_pf64pad`, a 1,000-token prompt: 0.692 → 0.500 s). Without
+> either, the engine runs as `0.2.8-zoo`. `0.2.8-zoo` builds for x86_64 macOS: since `0.2.6-zoo` lowered the floor to
 > macOS 26, a Release (universal) build of a macOS app compiles this package for x86_64 too, where
 > `Float16` is unavailable, and three upstream files had no x86_64 guard (`RepetitionPenaltyGPUState`,
 > `CoreAISequentialVLMEngine`, `StateHandler+NDArray`), so the build failed. They now take the guard
