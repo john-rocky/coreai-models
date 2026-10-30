@@ -182,13 +182,25 @@ final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable
                 // rewind on those models must become a full reset and replay.
                 let needsRewind = commonPrefix < self.engine.processedTokenCount
                 if isDivergence || (needsRewind && self.engine.hasNonTruncatableStates) {
-                    // Tokens differ — full reset (partial rewind corrupts buffer rotation)
                     await self.engine.computeStream.currentWorkCompleted()
-                    self.engine.reset()
-                    self.history.clear()
-                    resolvedNewTokens = input[...]
-                    commonPrefix = 0
-                    self.lastPrefixHitCount = 0
+                    if self.engine.hasNonTruncatableStates,
+                        let index = self.engine.checkpointIndex(keptBy: input, commonPrefix: commonPrefix)
+                    {
+                        // The input keeps the checkpoint: the recurrent state returns to it and
+                        // only what follows it is replayed (see checkpoint()).
+                        self.engine.restoreCheckpoint(writingStates: self.checkpointRestoresStates)
+                        self.history.truncate(to: index)
+                        resolvedNewTokens = input[index...]
+                        commonPrefix = index
+                        self.lastPrefixHitCount = index
+                    } else {
+                        // Tokens differ — full reset (partial rewind corrupts buffer rotation)
+                        self.engine.reset()
+                        self.history.clear()
+                        resolvedNewTokens = input[...]
+                        commonPrefix = 0
+                        self.lastPrefixHitCount = 0
+                    }
                 } else {
                     if needsRewind {
                         // Pure extension — partial rewind (buffer phase preserved)
@@ -373,9 +385,23 @@ final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable
             // Do NOT cancel — cancelling corrupts the pipeline's double-buffer state.
             // The KV cache is valid up to processedTokenCount after natural completion.
             if engine.hasNonTruncatableStates {
-                throw InferenceRuntimeError.invalidState(
-                    "Partial reset is not supported for hybrid models with recurrent state. "
-                        + "Use reset(to: 0) and replay the prefix.")
+                // Recurrent state cannot be cut back: it stays where it is when everything is
+                // kept, or returns to the checkpoint when the kept prefix covers it.
+                guard let checkpointIndex = engine.checkpointTokenIndex, tokenIndex >= checkpointIndex
+                else {
+                    throw InferenceRuntimeError.invalidState(
+                        "Partial reset is not supported for hybrid models with recurrent state. "
+                            + "Use reset(to: 0) and replay the prefix.")
+                }
+                drain()
+                await engine.computeStream.currentWorkCompleted()
+                guard tryAcquireEngine() else { return }
+                defer { releaseEngine() }
+                if tokenIndex < engine.processedTokenCount {
+                    engine.restoreCheckpoint(writingStates: checkpointRestoresStates)
+                }
+                history.truncate(to: engine.processedTokenCount)
+                return
             }
             drain()
             await engine.computeStream.currentWorkCompleted()
@@ -407,6 +433,64 @@ final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable
         acquireEngine()
         defer { releaseEngine() }
         try await engine.performWarmup(queryLength: queryLength, samplingConfig: sampling)
+    }
+
+    // MARK: - Checkpoint
+
+    /// A hybrid model's recurrent states (the persistent fixed-shape ones) can be saved and
+    /// returned to; an attention-only model rewinds by moving the cursor and needs none.
+    var supportsCheckpoint: Bool { engine.hasNonTruncatableStates }
+
+    /// Saves the recurrent states after the `processedTokenCount` tokens processed so far (see
+    /// `InferenceEngine.checkpoint()`). As in a partial reset, an open generation is left to
+    /// finish (cancelling corrupts the pipeline's double-buffer state) and the copy waits for
+    /// the GPU. The KV cache is not copied: after a return every position from the checkpoint
+    /// on is rewritten before a later step reads it (each step's position_ids run
+    /// 0..<processedTokenCount + query). The history is cut at the checkpoint: a generation
+    /// leaves its last sampled token there without having fed it, and an input that continues
+    /// with that token must replay it.
+    func checkpoint() async throws {
+        guard engine.hasNonTruncatableStates else { return }
+        await _generationTask.withLock({ $0 })?.value
+        drain()
+        await engine.computeStream.currentWorkCompleted()
+        guard tryAcquireEngine() else { return }
+        defer { releaseEngine() }
+        let tokenIndex = engine.processedTokenCount
+        guard tokenIndex > 0, history.count >= tokenIndex else {
+            engine.savedCheckpoint = nil
+            return
+        }
+        history.truncate(to: tokenIndex)
+        engine.saveCheckpoint(tokens: history.tokens)
+    }
+
+    func discardCheckpoint() async {
+        await _generationTask.withLock({ $0 })?.value
+        drain()
+        guard tryAcquireEngine() else { return }
+        defer { releaseEngine() }
+        engine.savedCheckpoint = nil
+    }
+
+    // MARK: - Testing
+
+    /// Testing only (a gate's negative control): when false, a return to the checkpoint moves
+    /// the cursor but leaves the recurrent states as the last step left them.
+    nonisolated(unsafe) var checkpointRestoresStates = true
+
+    /// Testing only: chunks that rode the static-chunk "prefill" function since load.
+    var prefillChunkCount: Int { engine.prefillChunkCount }
+
+    /// Testing only: the raw float16 bits of the last prompt step's logits (the first generated
+    /// token's), read once the generation and the GPU are done.
+    func lastPromptLogitsBits() async -> [UInt16] {
+        await _generationTask.withLock({ $0 })?.value
+        drain()
+        await engine.computeStream.currentWorkCompleted()
+        let count = engine.vocabSize
+        let pointer = engine.logits.metalBuffer.contents().bindMemory(to: UInt16.self, capacity: count)
+        return Array(UnsafeBufferPointer(start: pointer, count: count))
     }
 }
 
@@ -566,6 +650,16 @@ private struct PipelinedStaticInput {
     let strides: [Int]
 }
 
+/// A hybrid model's recurrent states after `tokenIndex` tokens (see
+/// CoreAIPipelinedEngine.checkpoint()).
+private struct PipelinedCheckpoint {
+    let tokenIndex: Int
+    /// The first `tokenIndex` tokens of the history.
+    let tokens: [Int32]
+    /// One copy per persistent state buffer, in FixedMTLBufferState's order.
+    let snapshots: [Data]
+}
+
 /// One-shot rendezvous between the sampler's GPU-completion callback (which learns the
 /// sampled token on a Metal callback thread) and the decode loop (which must know that token
 /// BEFORE it can gather per-token inputs for the next step). Either side may arrive first;
@@ -690,6 +784,12 @@ private struct EngineImpl: ~Copyable {
     // Last GPU-sampled token, mirrored to the CPU only when per-token inputs need it
     // (the decode loop must gather the next step's rows for this token).
     var lastSampledToken: Int32? = nil
+
+    // Recurrent-state checkpoint (hybrid models) — see CoreAIPipelinedEngine.checkpoint()
+    var savedCheckpoint: PipelinedCheckpoint? = nil
+    var checkpointTokenIndex: Int? { savedCheckpoint?.tokenIndex }
+    // Full chunks encoded through the "prefill" function (testing counter)
+    var prefillChunkCount = 0
 
     // Backpressure gate — see PipelineGate doc-comment for the failure mode it prevents.
     // Capacity matches pipeline depth: {encode logits + sampler commit + optional KV-cache grow} in flight.
@@ -1988,6 +2088,7 @@ private struct EngineImpl: ~Copyable {
         let usePrefillFunction = prefillFunction != nil && queryLength == prefillChunkLength
             && queryLength > 1
         let encodeFunction = usePrefillFunction ? prefillFunction! : function
+        if usePrefillFunction { prefillChunkCount += 1 }
         let idsDesc = usePrefillFunction ? prefillInputIdsBaseDesc! : inputIdsBaseDesc
         let posDesc = usePrefillFunction ? prefillPositionIdsBaseDesc! : positionIdsBaseDesc
         let logitsDesc = usePrefillFunction ? prefillLogitsBaseDesc! : logitsBaseDesc
@@ -2081,7 +2182,49 @@ private struct EngineImpl: ~Copyable {
         // Per-token input slots need no clearing: each step's slot is fully
         // rewritten by the provider before it is bound.
         additionalStates?.reset()
+        savedCheckpoint = nil
         span.end()
+    }
+
+    // MARK: - Checkpoint
+
+    /// Copies the recurrent states at `processedTokenCount`; `tokens` are the tokens they hold.
+    /// Caller must ensure no in-flight GPU work writes the states.
+    mutating func saveCheckpoint(tokens: [Int32]) {
+        let start = ContinuousClock.now
+        let snapshots = additionalStates?.snapshot() ?? []
+        savedCheckpoint = PipelinedCheckpoint(
+            tokenIndex: processedTokenCount, tokens: tokens, snapshots: snapshots)
+        let byteCount = snapshots.reduce(0) { $0 + $1.count }
+        CLILogger.log(
+            "Checkpoint at \(processedTokenCount) tokens: \(byteCount) bytes of recurrent state copied in "
+                + "\(ContinuousClock.now - start)")
+    }
+
+    /// The checkpoint's token index when `input` keeps it as a prefix (and goes past it), else nil.
+    func checkpointIndex(keptBy input: [Int32], commonPrefix: Int) -> Int? {
+        guard let checkpoint = savedCheckpoint, commonPrefix >= checkpoint.tokenIndex,
+            checkpoint.tokenIndex < input.count,
+            input.prefix(checkpoint.tokenIndex).elementsEqual(checkpoint.tokens)
+        else { return nil }
+        return checkpoint.tokenIndex
+    }
+
+    /// Returns to the checkpoint: its states written back (unless `writingStates` is false, a
+    /// test's negative control), the cursor at its token index. Caller must ensure no in-flight
+    /// GPU work references the states.
+    mutating func restoreCheckpoint(writingStates: Bool) {
+        guard let checkpoint = savedCheckpoint else { return }
+        let start = ContinuousClock.now
+        if writingStates {
+            additionalStates?.restore(checkpoint.snapshots)
+        }
+        processedTokenCount = checkpoint.tokenIndex
+        step = checkpoint.tokenIndex
+        lastSampledToken = nil
+        CLILogger.log(
+            "Restored the checkpoint at \(checkpoint.tokenIndex) tokens"
+                + (writingStates ? "" : " (states left as they were)") + " in \(ContinuousClock.now - start)")
     }
 
     // MARK: - Warmup

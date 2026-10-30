@@ -5,6 +5,7 @@
 
 import CoreAI
 import CoreAIShared
+import Foundation
 import Metal
 
 /// Fixed-size MTLBuffer state for non-truncatable persistent states (pipelined engine).
@@ -58,6 +59,25 @@ public final class FixedMTLBufferState {
     public func reset() {
         for (_, buffer, _, _, _) in bindings {
             memset(buffer.contents(), 0, buffer.length)
+        }
+    }
+
+    /// A copy of every state buffer, in binding order. Caller must ensure no in-flight GPU
+    /// work writes these.
+    func snapshot() -> [Data] {
+        bindings.map { Data(bytes: $0.buffer.contents(), count: $0.buffer.length) }
+    }
+
+    /// Writes a `snapshot()` back. Caller must ensure no in-flight GPU work references these.
+    func restore(_ snapshot: [Data]) {
+        precondition(
+            snapshot.count == bindings.count,
+            "restore: snapshot of \(snapshot.count) states, have \(bindings.count)")
+        for (binding, bytes) in zip(bindings, snapshot) {
+            precondition(bytes.count == binding.buffer.length, "restore: '\(binding.name)' size differs")
+            bytes.withUnsafeBytes { source in
+                _ = memcpy(binding.buffer.contents(), source.baseAddress!, bytes.count)
+            }
         }
     }
 }
