@@ -52,6 +52,26 @@ struct ChunkedPrefillPlanTests {
         #expect(plan(129, padTailMinimum: 1) == ChunkedPrefillPlan(fullChunks: 2, paddedTokens: 0, singleSteps: 0))
     }
 
+    @Test("a checkpoint inside the prefill lands on the last split at or before the point asked for")
+    func split() {
+        // 15 full chunks + a padded 39: splits at 0, 64, ..., 960, 999
+        let padded = plan(1000, padTailMinimum: 4)
+        #expect(padded.split(atMost: 0, chunkLength: 64) == 0)
+        #expect(padded.split(atMost: 63, chunkLength: 64) == 0)
+        #expect(padded.split(atMost: 64, chunkLength: 64) == 64)
+        #expect(padded.split(atMost: 500, chunkLength: 64) == 448)
+        #expect(padded.split(atMost: 990, chunkLength: 64) == 960)  // inside the padded chunk
+        #expect(padded.split(atMost: 999, chunkLength: 64) == 999)
+        #expect(padded.split(atMost: 5000, chunkLength: 64) == 999)
+        // the same tail as 39 S=1 steps: every step is a split
+        let steps = plan(1000)
+        #expect(steps.split(atMost: 990, chunkLength: 64) == 990)
+        #expect(steps.split(atMost: 5000, chunkLength: 64) == 999)
+        // a prompt shorter than a chunk: its padded tail or nothing
+        #expect(plan(5, padTailMinimum: 4).split(atMost: 3, chunkLength: 64) == 0)
+        #expect(plan(5, padTailMinimum: 4).split(atMost: 4, chunkLength: 64) == 4)
+    }
+
     @Test("a padded chunk needs KV room for a whole chunk past its start, else S=1")
     func capacity() {
         // 15 chunks from 0 end at 960; the padded one writes 960..<1024

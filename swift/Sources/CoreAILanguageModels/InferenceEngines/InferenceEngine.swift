@@ -42,15 +42,24 @@ public struct InferenceOptions: Sendable {
     /// When set, engines use these token IDs instead of sampling.
     /// Used by MMLU-style evaluation to compute P(continuation|context).
     public var forcedContinuation: [Int32]?
+    /// On an engine that checkpoints (`InferenceEngine.supportsCheckpoint`), the checkpoint is
+    /// saved while this input is processed: after its first `checkpointAfter` tokens, or at the
+    /// last point before that where the engine's prefill splits the input (a chunk boundary),
+    /// replacing any checkpoint. A later `reset(to:)` at or past that point returns there, as
+    /// after `checkpoint()`, without the separate call that would end there. Ignored by engines
+    /// that cannot save one mid-input, and when the input keeps that point from an earlier call.
+    public var checkpointAfter: Int?
 
     public init(
         maxTokens: Int? = nil,
         includeLogits: Bool = false,
-        forcedContinuation: [Int32]? = nil
+        forcedContinuation: [Int32]? = nil,
+        checkpointAfter: Int? = nil
     ) {
         self.maxTokens = maxTokens
         self.includeLogits = includeLogits
         self.forcedContinuation = forcedContinuation
+        self.checkpointAfter = checkpointAfter
     }
 }
 

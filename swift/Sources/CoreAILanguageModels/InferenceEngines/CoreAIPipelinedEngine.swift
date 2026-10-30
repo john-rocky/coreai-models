@@ -256,10 +256,20 @@ final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable
                     self.history.append(contentsOf: newTokens[...])
                 }
 
+                // A checkpoint inside this prefill (InferenceOptions.checkpointAfter): at a point
+                // the new tokens reach before the sampled one, from a cursor at their start.
+                var midCheckpoint: PipelinedCheckpointRequest? = nil
+                if self.engine.hasNonTruncatableStates, let at = inferenceOptions.checkpointAfter,
+                    at >= commonPrefix, at < input.count, self.engine.processedTokenCount == commonPrefix
+                {
+                    midCheckpoint = PipelinedCheckpointRequest(atMost: at, input: input)
+                }
+
                 try await self.engine.runCompletion(
                     prompt: newTokens,
                     sampler: samplingConfiguration,
                     maxTokens: maxTokens,
+                    checkpoint: midCheckpoint,
                     yieldingTo: tokenContinuation
                 )
 
@@ -495,6 +505,9 @@ final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable
     /// Testing only: of those, padded last chunks (bundles whose "prefill" takes one).
     var paddedChunkCount: Int { engine.paddedChunkCount }
 
+    /// Testing only: the held checkpoint's token position, if any.
+    var checkpointTokenIndex: Int? { engine.checkpointTokenIndex }
+
     /// Testing only: the raw float16 bits of the last prompt step's logits (the first generated
     /// token's), read once the generation and the GPU are done.
     func lastPromptLogitsBits() async -> [UInt16] {
@@ -673,6 +686,13 @@ private struct PipelinedCheckpoint {
     let snapshots: [Data]
 }
 
+/// A checkpoint to save inside a prefill (InferenceOptions.checkpointAfter): at the last point of
+/// the prefill's split at or before `atMost`; `input` is the generate() input (position = index).
+struct PipelinedCheckpointRequest {
+    let atMost: Int
+    let input: [Int32]
+}
+
 /// How a prompt rides a static-chunk "prefill" function: full chunks, then the last partial
 /// chunk as one padded call or as S=1 steps on the main function, leaving the prompt's last
 /// token for the sampled step.
@@ -708,6 +728,16 @@ struct ChunkedPrefillPlan: Equatable {
         } else {
             self.init(fullChunks: full, paddedTokens: 0, singleSteps: tail)
         }
+    }
+
+    /// The last point of the plan's split at or before `offset` tokens from its start (0, the end
+    /// of a full chunk, of the padded chunk, or of an S=1 step): where a checkpoint inside the
+    /// prefill costs no call of its own.
+    func split(atMost offset: Int, chunkLength: Int) -> Int {
+        let chunked = fullChunks * chunkLength
+        guard offset >= chunked else { return max(0, offset) / chunkLength * chunkLength }
+        if paddedTokens > 0 { return offset >= chunked + paddedTokens ? chunked + paddedTokens : chunked }
+        return chunked + min(singleSteps, offset - chunked)
     }
 }
 
@@ -1656,6 +1686,7 @@ private struct EngineImpl: ~Copyable {
         prompt: [InferenceEngine.TokenId],
         sampler: SamplingConfiguration,
         maxTokens: Int?,
+        checkpoint: PipelinedCheckpointRequest? = nil,
         yieldingTo continuation: AsyncThrowingStream<InferenceEngine.TokenId, Error>.Continuation
     ) async throws {
         let gpuSampler = try getOrCreateSampler(for: sampler)
@@ -1731,8 +1762,12 @@ private struct EngineImpl: ~Copyable {
         if !prompt.isEmpty {
             let prefillTokens: ArraySlice<Int32>
             if prompt.count > config.chunkThreshold || (prefillFunction != nil && prompt.count > 1) {
-                prefillTokens = try await processChunkedInput(tokens: prompt)
+                prefillTokens = try await processChunkedInput(tokens: prompt, checkpoint: checkpoint)
             } else {
+                // One call for the whole prompt: no split inside it to checkpoint at
+                if let checkpoint, checkpoint.atMost == processedTokenCount {
+                    await checkpointMidPrompt(checkpoint)
+                }
                 let prefillCapacity = max(1, prompt.count)
                 if try logits.ensureCapacity(forContextLength: prefillCapacity) {
                     let fmt = ByteCountFormatter()
@@ -2127,8 +2162,13 @@ private struct EngineImpl: ~Copyable {
 
     // MARK: - Chunked Prefill
 
-    mutating func processChunkedInput(tokens: [Int32]) async throws -> ArraySlice<Int32> {
+    /// `checkpoint`: saved at the last point of the split at or before its position (a mark checked
+    /// after every call), so it costs no call of its own.
+    mutating func processChunkedInput(
+        tokens: [Int32], checkpoint: PipelinedCheckpointRequest? = nil
+    ) async throws -> ArraySlice<Int32> {
         var remainingTokens = tokens[...]
+        var mark: Int? = nil
 
         // Static-chunk prefill function: full S=C chunks ride the "prefill"
         // graph (its own static logits buffer), the tail runs as one padded
@@ -2140,18 +2180,26 @@ private struct EngineImpl: ~Copyable {
                 tokenCount: remainingTokens.count, start: processedTokenCount,
                 chunkLength: chunkLength, padTailMinimum: padTailMinimum,
                 capacity: min(kvCache.currentCapacity, config.maxContextLength))
+            if let checkpoint {
+                mark = processedTokenCount
+                    + plan.split(atMost: checkpoint.atMost - processedTokenCount, chunkLength: chunkLength)
+                if processedTokenCount == mark { await checkpointMidPrompt(checkpoint) }
+            }
             for _ in 0..<plan.fullChunks {
                 try await _encodeChunk(tokens: Array(remainingTokens.prefix(chunkLength)))
                 remainingTokens = remainingTokens.dropFirst(chunkLength)
+                if let checkpoint, processedTokenCount == mark { await checkpointMidPrompt(checkpoint) }
             }
             if plan.paddedTokens > 0 {
                 try await _encodeChunk(
                     tokens: Array(remainingTokens.prefix(plan.paddedTokens)), paddedTo: chunkLength)
                 remainingTokens = remainingTokens.dropFirst(plan.paddedTokens)
+                if let checkpoint, processedTokenCount == mark { await checkpointMidPrompt(checkpoint) }
             }
             for _ in 0..<plan.singleSteps {
                 try await _encodeChunk(tokens: [remainingTokens.first!])
                 remainingTokens = remainingTokens.dropFirst()
+                if let checkpoint, processedTokenCount == mark { await checkpointMidPrompt(checkpoint) }
             }
             return remainingTokens
         }
@@ -2160,13 +2208,30 @@ private struct EngineImpl: ~Copyable {
 
         try logits.ensureCapacity(forContextLength: chunkSize)
 
+        if let checkpoint {
+            // the loop below ends its chunks at start + chunkSize * i, i = 1 ... (count - 1) / chunkSize
+            let chunks = (tokens.count - 1) / chunkSize
+            mark = processedTokenCount
+                + chunkSize * min(chunks, max(0, checkpoint.atMost - processedTokenCount) / chunkSize)
+            if processedTokenCount == mark { await checkpointMidPrompt(checkpoint) }
+        }
         while remainingTokens.count > chunkSize {
             let chunk = Array(remainingTokens.prefix(chunkSize))
             try await _encodeChunk(tokens: chunk)
             remainingTokens = remainingTokens.dropFirst(chunkSize)
+            if let checkpoint, processedTokenCount == mark { await checkpointMidPrompt(checkpoint) }
         }
 
         return remainingTokens
+    }
+
+    /// The checkpoint inside a prefill (InferenceOptions.checkpointAfter): waits for the GPU to
+    /// finish what was encoded up to here, then copies the recurrent states at
+    /// `processedTokenCount` with the input's first tokens.
+    mutating func checkpointMidPrompt(_ request: PipelinedCheckpointRequest) async {
+        guard processedTokenCount > 0, processedTokenCount <= request.input.count else { return }
+        await computeStream.currentWorkCompleted()
+        saveCheckpoint(tokens: Array(request.input[..<processedTokenCount]))
     }
 
     /// `paddedTo`: the tokens fed as a static `paddedTo`-long query, the padded rows carrying
