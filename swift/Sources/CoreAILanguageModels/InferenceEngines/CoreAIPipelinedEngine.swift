@@ -730,14 +730,13 @@ struct ChunkedPrefillPlan: Equatable {
         }
     }
 
-    /// The last point of the plan's split at or before `offset` tokens from its start (0, the end
-    /// of a full chunk, of the padded chunk, or of an S=1 step): where a checkpoint inside the
-    /// prefill costs no call of its own.
+    /// The last chunk boundary of the plan at or before `offset` tokens from its start (0 or the
+    /// end of a full chunk): where a checkpoint inside the prefill costs no call of its own, and
+    /// where a later prefill from it runs the calls a prefill from the start runs, whether the tail
+    /// after the full chunks goes padded or S=1. A point inside the tail would move every later
+    /// chunk off that grid.
     func split(atMost offset: Int, chunkLength: Int) -> Int {
-        let chunked = fullChunks * chunkLength
-        guard offset >= chunked else { return max(0, offset) / chunkLength * chunkLength }
-        if paddedTokens > 0 { return offset >= chunked + paddedTokens ? chunked + paddedTokens : chunked }
-        return chunked + min(singleSteps, offset - chunked)
+        min(max(0, offset), fullChunks * chunkLength) / chunkLength * chunkLength
     }
 }
 
