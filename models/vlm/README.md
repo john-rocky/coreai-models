@@ -10,6 +10,8 @@ supported models are registered in its `SUPPORTED_MODELS` table.
 | Short-name | HuggingFace ID            | Notes                                    |
 |------------|---------------------------|------------------------------------------|
 | `qwen3-vl` | `Qwen/Qwen3-VL-2B-Instruct` | 448×448 vision encoder, f16 text decoder |
+| `qwen3-vl-4b` | `Qwen/Qwen3-VL-4B-Instruct` | 448×448 vision encoder, f16 text decoder |
+| `qwen3-vl-8b` | `Qwen/Qwen3-VL-8B-Instruct` | 448×448 vision encoder, f16 text decoder, untied `lm_head` |
 | `muse-glimmer-vl` | `meta-models/Muse-Glimmer-30B` | ViT-G/14 vision encoder, f16 text decoder |
 
 ## Exporting
@@ -18,6 +20,8 @@ supported models are registered in its `SUPPORTED_MODELS` table.
 uv run coreai.vlm.export --list-models          # list supported VLMs
 uv run coreai.vlm.export qwen3-vl               # full bundle (text + vision)
 uv run coreai.vlm.export qwen3-vl --skip-vision # text decoder + embedding only
+uv run coreai.vlm.export qwen3-vl-4b            # Qwen3-VL-4B-Instruct
+uv run coreai.vlm.export qwen3-vl-8b            # Qwen3-VL-8B-Instruct
 ```
 
 Options:

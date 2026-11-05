@@ -215,6 +215,8 @@ uv run coreai.diffusion.export sana-sprint-1.6b
 ```bash
 uv run coreai.vlm.export --list-models   # list supported VLMs
 uv run coreai.vlm.export qwen3-vl        # text decoder + token embedding + vision encoder
+uv run coreai.vlm.export qwen3-vl-4b
+uv run coreai.vlm.export qwen3-vl-8b
 ```
 
 This produces a single `<name>/` bundle (`kind=vlm`) holding the text

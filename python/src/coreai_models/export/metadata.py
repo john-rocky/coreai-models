@@ -334,6 +334,24 @@ _METADATA: dict[str, AIModelMetadataFields] = {
             "Source: https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct"
         ),
     ),
+    "Qwen/Qwen3-VL-4B-Instruct": AIModelMetadataFields(
+        author="Qwen Team",
+        license="Apache-2.0",
+        model_description=(
+            "Qwen3-VL-4B-Instruct is a 4B-parameter instruction-tuned "
+            "vision-language model from the Qwen3-VL family. "
+            "Source: https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct"
+        ),
+    ),
+    "Qwen/Qwen3-VL-8B-Instruct": AIModelMetadataFields(
+        author="Qwen Team",
+        license="Apache-2.0",
+        model_description=(
+            "Qwen3-VL-8B-Instruct is an 8B-parameter instruction-tuned "
+            "vision-language model from the Qwen3-VL family. "
+            "Source: https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct"
+        ),
+    ),
     # ---- Diffusion ----
     "black-forest-labs/FLUX.2-klein-4B": AIModelMetadataFields(
         author="Black Forest Labs",

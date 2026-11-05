@@ -93,6 +93,36 @@ SUPPORTED_MODELS: dict[str, VLMSpec] = {
         image_strategy="stretch",
         include_image_info=True,
     ),
+    "qwen3-vl-4b": VLMSpec(
+        short_name="qwen3-vl-4b",
+        hf_model_id="Qwen/Qwen3-VL-4B-Instruct",
+        output_name="qwen3_vl_4b",
+        image_token_id=151655,  # <|image_pad|>
+        image_size=448,
+        patch_size=16,
+        spatial_merge_size=2,
+        temporal_patch_size=2,  # Qwen frames-per-image (single image -> duplicated)
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        rescale_factor=1.0,
+        image_strategy="stretch",
+        include_image_info=True,
+    ),
+    "qwen3-vl-8b": VLMSpec(
+        short_name="qwen3-vl-8b",
+        hf_model_id="Qwen/Qwen3-VL-8B-Instruct",
+        output_name="qwen3_vl_8b",
+        image_token_id=151655,  # <|image_pad|>
+        image_size=448,
+        patch_size=16,
+        spatial_merge_size=2,
+        temporal_patch_size=2,  # Qwen frames-per-image (single image -> duplicated)
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        rescale_factor=1.0,
+        image_strategy="stretch",
+        include_image_info=True,
+    ),
     "muse-glimmer-vl": VLMSpec(
         short_name="muse-glimmer-vl",
         hf_model_id="meta-models/Muse-Glimmer-30B",
@@ -139,7 +169,8 @@ def load_model_from_safetensors(
     """Load a VL text decoder directly from safetensors, bypassing from_hf_memory_efficient.
 
     Handles two checkpoint layouts:
-      - Qwen3-VL: ``model.language_model.*`` (text), ``model.visual.*`` (vision, skipped)
+      - Qwen3-VL: ``model.language_model.*`` (text), ``model.visual.*`` (vision, skipped),
+        plus a top-level ``lm_head.weight`` for 8B, whose head is not tied to the embeddings.
       - Muse Glimmer: ``model.language_model.*`` (text), ``model.vision_*`` (vision, skipped),
         plus a top-level ``lm_head.weight`` outside the language_model prefix.
     """
@@ -181,7 +212,7 @@ def load_model_from_safetensors(
                         tensor = tensor.to(dtype)
                     state_dict[model_key] = tensor
                 elif key == "lm_head.weight":
-                    # Muse Glimmer stores lm_head outside the language_model prefix
+                    # Muse Glimmer and Qwen3-VL-8B store lm_head outside the language_model prefix
                     tensor = f.get_tensor(key)
                     if tensor.dtype not in (torch.float16, torch.int8):
                         tensor = tensor.to(dtype)
