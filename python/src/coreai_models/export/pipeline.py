@@ -238,9 +238,10 @@ def resolve_model(config: ExportConfig) -> ResolvedModel:
     entry = get_model_entry(model_type)
 
     # Unwrap the per-modality sub-config (e.g. Gemma-3 wraps the text
-    # model under `text_config`)
+    # model under `text_config`). A text-only checkpoint of the same family
+    # (e.g. google/gemma-3-1b-it) has nothing to unwrap.
     if entry.hf_config_attr:
-        hf_config = getattr(hf_config, entry.hf_config_attr)
+        hf_config = getattr(hf_config, entry.hf_config_attr, hf_config)
 
     if config.variant == "iOS" and entry.ios_class is None:
         raise ValueError(f"Model '{model_type}' does not support iOS variant")

@@ -894,6 +894,11 @@ class BaseForCausalLM(torch.nn.Module):
         )
 
         raw_config = AutoConfig.from_pretrained(model_dir)
+        if hf_config_attr and not hasattr(raw_config, hf_config_attr):
+            # A text-only checkpoint of a multimodal family (e.g. google/gemma-3-1b-it): its config
+            # is already the text config and its keys carry no sub-model prefix.
+            hf_config_attr = None
+            hf_state_dict_prefix = ""
         hf_config = getattr(raw_config, hf_config_attr) if hf_config_attr else raw_config
 
         config = cls._get_reauthored_config(hf_config, max_context_length, num_layers=num_layers)
