@@ -251,10 +251,23 @@ def test_utility_export_args_for_console_scripts_and_recipes() -> None:
     ]
 
 
+def test_utility_export_args_for_depth_anything_base() -> None:
+    model = lookup_utility_model("depth-anything-3-base")
+    assert model is not None
+    assert _utility_to_export_args(model) == [
+        "uv",
+        "run",
+        "models/depth-anything/export.py",
+        "--model",
+        "depth-anything/da3-base",
+    ]
+
+
 def test_utility_platform_filter_excludes_macos_only() -> None:
     ios_models = filter_utility_models(platform="iOS")
     names = [u.short_name for u in ios_models]
     assert "depth-anything-3-small" not in names
+    assert "depth-anything-3-base" not in names
     assert "clip-vit-b32" in names
 
 

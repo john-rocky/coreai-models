@@ -13,7 +13,8 @@ brew install uv
 ## Export
 
 ```sh
-uv run export.py
+uv run export.py                                  # da3-small (default)
+uv run export.py --model depth-anything/da3-base  # da3-base
 ```
 
 Saves to `<repo-root>/exports/<model>_<dtype>.aimodel`. Pass `--output-dir <path>` to override the destination.
@@ -36,5 +37,6 @@ uv run export.py --help
 | Model                    | Parameters |
 | ------------------------ | ---------- |
 | depth-anything/da3-small | 35M        |
+| depth-anything/da3-base  | 135M       |
 
-[^1]: [Repository](https://github.com/ByteDance-Seed/Depth-Anything-3) · [HuggingFace](https://huggingface.co/depth-anything/da3-small)
+[^1]: [Repository](https://github.com/ByteDance-Seed/Depth-Anything-3) · HuggingFace: [da3-small](https://huggingface.co/depth-anything/da3-small), [da3-base](https://huggingface.co/depth-anything/da3-base)

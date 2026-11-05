@@ -10,6 +10,7 @@
 #     "coreai-core==1.0.0b3",
 #     "coreai-torch==0.4.3",
 #     "depth-anything-3 @ git+https://github.com/ByteDance-Seed/Depth-Anything-3.git",
+#     "pycolmap<3.12",
 #     "scipy<1.15",
 # ]
 #
@@ -25,6 +26,10 @@
 # # depth-anything-3 pins `numpy<2`, which collides with coreai-core's
 # # `numpy>=2.3`. This constraint is not relevant for this export script,
 # # so we override it in favor of coreai-core's requirement.
+# #
+# # pycolmap 3.12 and later bundle their own libomp, and importing one next to
+# # torch aborts with OMP Error #15. depth-anything-3 imports pycolmap at startup,
+# # but this export script never calls it, so the older wheel is enough.
 # override-dependencies = [
 #     "xformers ; python_version >= '99'",
 #     "numpy>=2.3.0",
@@ -171,7 +176,7 @@ def main():
     )
     parser.add_argument(
         "--model",
-        choices=["depth-anything/da3-small"],
+        choices=["depth-anything/da3-small", "depth-anything/da3-base"],
         default="depth-anything/da3-small",
         help="Model variant to convert.",
     )

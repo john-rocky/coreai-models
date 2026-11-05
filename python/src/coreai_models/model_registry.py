@@ -699,6 +699,14 @@ UTILITY_PRESETS: list[UtilityModel] = [
         "models/depth-anything/export.py",
         platforms=("macOS",),
     ),
+    UtilityModel(
+        "depth-anything-3-base",
+        "depth-anything/da3-base",
+        "depth-anything",
+        "depth",
+        "models/depth-anything/export.py",
+        platforms=("macOS",),
+    ),
     # --- Super-resolution ---
     UtilityModel(
         "edsr-x2",
