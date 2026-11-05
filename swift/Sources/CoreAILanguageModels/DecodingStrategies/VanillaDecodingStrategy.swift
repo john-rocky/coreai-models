@@ -222,8 +222,10 @@ extension VanillaDecodingStrategy.VanillaDecodedSequence {
                     let matchedText = tokenizer.decode(tokens: matched.map(Int.init))
                     engineSequence?.setStopReason(.stopSequence(matchedText))
 
-                    // Drain remaining tokens so the pipelined engine's producer Task completes.
-                    while try await iterator.next() != nil {}
+                    // Abandon the stream instead of draining it: the engines know nothing of stop
+                    // sequences, so a drain runs them to `maxTokens`. Releasing the sequence and its
+                    // iterator ends the pipelined producer within its pipeline depth; a pull-based
+                    // iterator simply stops being pulled.
                     engineSequence = nil
                     upstreamIterator = nil
 
