@@ -346,7 +346,18 @@ class Qwen3_5Model(nn.Module):
         kv_cache: KVCache | None = None,
         delta_cache: DeltaNetCache | None = None,
     ) -> torch.Tensor:
-        h = self.embed_tokens(input_ids)
+        return self.forward_embeddings(
+            self.embed_tokens(input_ids), position_ids, kv_cache, delta_cache
+        )
+
+    def forward_embeddings(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.IntTensor,
+        kv_cache: KVCache | None = None,
+        delta_cache: DeltaNetCache | None = None,
+    ) -> torch.Tensor:
+        h = inputs_embeds
         for layer in self.layers:
             h = layer(
                 h,
@@ -649,3 +660,67 @@ class Qwen3_5ForCausalLM(BaseForCausalLM):
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         return result
+
+
+class Qwen3_5ForCausalLMEmbeddings(Qwen3_5ForCausalLM):
+    """Qwen3.5 decoder entered at token embeddings, for a vision-language bundle.
+
+    forward(inputs_embeds, position_ids, k_cache, v_cache, conv_states, recurrent_states) -> logits
+
+    The runner embeds tokens with the bundle's ``embed.aimodel`` and merges image features into
+    them, so ``forward`` never reads ``model.embed_tokens``. The parameter stays because the tied
+    LM head shares it. ``vlm/export.py`` traces this class with no prefill graph.
+    """
+
+    exports_prefill_graph = False
+
+    @classmethod
+    @override
+    def _get_reauthored_config(
+        cls,
+        hf_config,
+        max_context_length: int | None = None,
+        num_layers: int | None = None,
+    ):
+        # A vision-language checkpoint nests the decoder's config under `text_config`.
+        text_config = getattr(hf_config, "text_config", hf_config)
+        return super()._get_reauthored_config(text_config, max_context_length, num_layers)
+
+    @BaseForCausalLM.cast_logits_bfloat16_to_float16
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        position_ids: torch.IntTensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        conv_states: torch.Tensor,
+        recurrent_states: torch.Tensor,
+    ) -> torch.Tensor:
+        kv_cache = KVCache(k_cache, v_cache)
+        delta_cache = DeltaNetCache(conv_states, recurrent_states)
+        out = self.model.forward_embeddings(inputs_embeds, position_ids, kv_cache, delta_cache)
+        return self.lm_head(out)
+
+    @override
+    def export_input_names(self) -> dict[str, tuple[str, ...]]:
+        return {MAIN_GRAPH_NAME: ("inputs_embeds", "position_ids")}
+
+    @override
+    def build_reference_inputs(
+        self,
+        config,
+        target_dtype: torch.dtype,
+        spec: TraceSpec,
+    ) -> dict[str, dict[str, Any]]:
+        graph = super().build_reference_inputs(config, target_dtype, spec)[MAIN_GRAPH_NAME]
+        del graph["input_ids"]
+        inputs_embeds = torch.randn(
+            spec.batch_size, spec.query_len, config.hidden_size, dtype=target_dtype
+        )
+        # The keys bind to `forward` in order, so the embeddings go first.
+        return {MAIN_GRAPH_NAME: {"inputs_embeds": inputs_embeds, **graph}}
+
+    @override
+    def build_dynamic_shapes(self, config, spec: TraceSpec) -> dict[str, Any]:
+        shapes = super().build_dynamic_shapes(config, spec)[MAIN_GRAPH_NAME]
+        return {MAIN_GRAPH_NAME: {"inputs_embeds": shapes.pop("input_ids"), **shapes}}

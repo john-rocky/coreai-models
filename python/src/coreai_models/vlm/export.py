@@ -17,6 +17,7 @@ Exports a vision-language model to Core AI format as a multi-asset bundle
 Usage:
     uv run coreai.vlm.export qwen3-vl [--max-context-length 4096] [--num-layers N]
     uv run coreai.vlm.export muse-glimmer-vl [--max-context-length 4096]
+    uv run coreai.vlm.export minicpm-v-4.6 [--max-context-length 4096]
     uv run coreai.vlm.export --list-models
 """
 
@@ -36,11 +37,13 @@ from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from transformers import AutoConfig, AutoTokenizer
 
-from coreai_models._constants import DEFAULT_INCLUDE_DEBUG_INFO
-from coreai_models.export.macos import export_to_coreai
+from coreai_models._constants import DEFAULT_INCLUDE_DEBUG_INFO, MAIN_GRAPH_NAME
+from coreai_models.export.macos import _build_reference_inputs, export_to_coreai
 from coreai_models.export.metadata import build_aimodel_metadata
+from coreai_models.models.macos.minicpmv4_6_vision import MiniCPMV46VisionModel
 from coreai_models.models.macos.muse_glimmer import MuseGlimmerForCausalLMEmbeddings
 from coreai_models.models.macos.muse_glimmer_vision import MuseGlimmerVisionModel
+from coreai_models.models.macos.qwen3_5 import Qwen3_5ForCausalLMEmbeddings
 from coreai_models.models.macos.qwen3_vl import Qwen3VLForCausalLMEmbeddings
 
 # Core AI state names for the persistent KV cache.
@@ -70,6 +73,10 @@ class VLMSpec:
     rescale_factor: float
     image_strategy: str = "stretch"
     include_image_info: bool = False
+    # What the checkpoint's processor puts around each image's placeholder tokens, as
+    # (before, after). The runner only expands the placeholder, so the wrapping goes into
+    # the bundled chat template.
+    image_token_wrapper: tuple[str, str] | None = None
 
     @property
     def num_visual_tokens(self) -> int:
@@ -106,6 +113,20 @@ SUPPORTED_MODELS: dict[str, VLMSpec] = {
         image_std=(0.26862954, 0.26130258, 0.27577711),
         rescale_factor=1.0,
     ),
+    "minicpm-v-4.6": VLMSpec(
+        short_name="minicpm-v-4.6",
+        hf_model_id="openbmb/MiniCPM-V-4.6",
+        output_name="minicpm_v_4_6",
+        image_token_id=248056,  # <|image_pad|>
+        image_size=448,
+        patch_size=14,
+        spatial_merge_size=4,  # two 2x2 merges: window attention, then downsample MLP
+        temporal_patch_size=1,
+        image_mean=(0.5, 0.5, 0.5),
+        image_std=(0.5, 0.5, 0.5),
+        rescale_factor=1.0,
+        image_token_wrapper=("<image_id>0</image_id><image>", "</image>"),
+    ),
 }
 
 
@@ -138,10 +159,12 @@ def load_model_from_safetensors(
 ) -> torch.nn.Module:
     """Load a VL text decoder directly from safetensors, bypassing from_hf_memory_efficient.
 
-    Handles two checkpoint layouts:
+    Handles three checkpoint layouts:
       - Qwen3-VL: ``model.language_model.*`` (text), ``model.visual.*`` (vision, skipped)
       - Muse Glimmer: ``model.language_model.*`` (text), ``model.vision_*`` (vision, skipped),
         plus a top-level ``lm_head.weight`` outside the language_model prefix.
+      - MiniCPM-V-4.6: ``model.language_model.*`` (text), ``model.vision_tower.*`` and
+        ``model.merger.*`` (vision, skipped).
     """
     # Set config
     text_cfg = model_class._get_reauthored_config(hf_config, max_ctx, num_layers)
@@ -312,6 +335,23 @@ async def export_embed_model(
 # ---------------------------------------------------------------------------
 
 
+def _wrap_image_token_in_chat_template(chat_template: str, image_token: str, spec: VLMSpec) -> str:
+    """Make the chat template emit ``spec.image_token_wrapper`` around the image placeholder.
+
+    Applies to string message content, which is what the runner passes: the placeholder token,
+    a newline, then the prompt. The runner then expands the placeholder to the image's tokens.
+    """
+    content = "{{- content -}}"
+    if chat_template.count(content) != 1:
+        raise ValueError(
+            f"{spec.short_name}: expected one '{content}' in the chat template, "
+            f"found {chat_template.count(content)}. Update the image token wrapping."
+        )
+    before, after = spec.image_token_wrapper
+    wrapped = f"{{{{- content | replace('{image_token}', '{before}{image_token}{after}') -}}}}"
+    return chat_template.replace(content, wrapped)
+
+
 async def export_text_bundle(
     spec: VLMSpec,
     *,
@@ -354,6 +394,8 @@ async def export_text_bundle(
     logging.info("Loading model from safetensors (direct, skips vision encoder)...")
     if spec.short_name == "muse-glimmer-vl":
         model_class = MuseGlimmerForCausalLMEmbeddings
+    elif spec.short_name == "minicpm-v-4.6":
+        model_class = Qwen3_5ForCausalLMEmbeddings
     else:
         model_class = Qwen3VLForCausalLMEmbeddings
     model = load_model_from_safetensors(
@@ -385,39 +427,51 @@ async def export_text_bundle(
         logging.info("Quantization complete.")
 
     # ---- 4. Build reference inputs (stateful KV: caches are in-place states) ----
-    QUERY_LEN = 64
-    OFFSET = 64
-    inputs_embeds = torch.randn(1, QUERY_LEN, hidden_size, dtype=torch.float16)
-    position_ids = torch.arange(QUERY_LEN + OFFSET, dtype=torch.int32).unsqueeze(0)
+    if isinstance(model, Qwen3_5ForCausalLMEmbeddings):
+        # Hybrid decoder: the model's export contract sizes its four states by layer type.
+        reference_inputs, dynamic_shapes = _build_reference_inputs(
+            model, text_cfg, torch.float16, max_ctx
+        )
+        input_names = model.export_input_names()[MAIN_GRAPH_NAME]
+        state_names = model.export_state_names()[MAIN_GRAPH_NAME]
+    else:
+        QUERY_LEN = 64
+        OFFSET = 64
+        inputs_embeds = torch.randn(1, QUERY_LEN, hidden_size, dtype=torch.float16)
+        position_ids = torch.arange(QUERY_LEN + OFFSET, dtype=torch.int32).unsqueeze(0)
 
-    n_layers = num_layers or text_cfg.num_hidden_layers
-    n_kv_heads = text_cfg.num_key_value_heads
-    head_dim = getattr(text_cfg, "head_dim", text_cfg.hidden_size // text_cfg.num_attention_heads)
-    k_cache = torch.zeros(n_layers, 1, n_kv_heads, max_ctx, head_dim, dtype=torch.float16)
-    v_cache = torch.zeros(n_layers, 1, n_kv_heads, max_ctx, head_dim, dtype=torch.float16)
+        n_layers = num_layers or text_cfg.num_hidden_layers
+        n_kv_heads = text_cfg.num_key_value_heads
+        head_dim = getattr(
+            text_cfg, "head_dim", text_cfg.hidden_size // text_cfg.num_attention_heads
+        )
+        k_cache = torch.zeros(n_layers, 1, n_kv_heads, max_ctx, head_dim, dtype=torch.float16)
+        v_cache = torch.zeros(n_layers, 1, n_kv_heads, max_ctx, head_dim, dtype=torch.float16)
 
-    reference_inputs = {
-        "inputs_embeds": inputs_embeds,
-        "position_ids": position_ids,
-        "k_cache": k_cache,
-        "v_cache": v_cache,
-    }
-    dynamic_shapes = {
-        "inputs_embeds": {1: torch.export.Dim("query_len", max=max_ctx - 2)},
-        "position_ids": {1: torch.export.Dim("seq_pos", min=QUERY_LEN, max=max_ctx - 1)},
-        "k_cache": None,  # fixed size
-        "v_cache": None,
-    }
+        reference_inputs = {
+            "inputs_embeds": inputs_embeds,
+            "position_ids": position_ids,
+            "k_cache": k_cache,
+            "v_cache": v_cache,
+        }
+        dynamic_shapes = {
+            "inputs_embeds": {1: torch.export.Dim("query_len", max=max_ctx - 2)},
+            "position_ids": {1: torch.export.Dim("seq_pos", min=QUERY_LEN, max=max_ctx - 1)},
+            "k_cache": None,  # fixed size
+            "v_cache": None,
+        }
+        input_names = ("inputs_embeds", "position_ids")
+        state_names = KV_STATE_NAMES
 
-    # ---- 5. Export (stateful KV: k_cache/v_cache surfaced as in-place states) ----
+    # ---- 5. Export (stateful KV: the caches are surfaced as in-place states) ----
     logging.info("Exporting text decoder to CoreAI format (stateful KV)...")
     program = export_to_coreai(
         model,
         reference_inputs,
         dynamic_shapes=dynamic_shapes,
-        input_names=("inputs_embeds", "position_ids"),
+        input_names=input_names,
         output_names=("logits",),
-        state_names=KV_STATE_NAMES,
+        state_names=state_names,
         include_debug_info=include_debug_info,
     )
 
@@ -445,6 +499,10 @@ async def export_text_bundle(
     # ---- 7. Tokenizer ----
     logging.info("Saving tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    if spec.image_token_wrapper is not None:
+        tokenizer.chat_template = _wrap_image_token_in_chat_template(
+            tokenizer.chat_template, tokenizer.convert_ids_to_tokens(spec.image_token_id), spec
+        )
     tokenizer.save_pretrained(str(bundle_path / "tokenizer"))
 
     # ---- 8. metadata.json ----
@@ -744,6 +802,21 @@ async def export_vision_encoder(
         vision_model = MuseGlimmerVisionModel.from_pretrained(spec.hf_model_id, dtype=torch.float32)
         # MuseGlimmerVisionModel.forward already returns [1, N, text_hidden]
         # so we only need the f16 cast wrapper (no unsqueeze needed).
+        export_module = CastF16VisionEncoder(vision_model).eval()
+        num_visual_tokens = spec.num_visual_tokens
+        pixel_shape = (1, 3, spec.image_size, spec.image_size)
+    elif spec.short_name == "minicpm-v-4.6":
+        # One source image at a fixed resolution: the processor's slices have no counterpart in
+        # the runner, which encodes a single square.
+        if num_frames != 1:
+            raise NotImplementedError(
+                f"{spec.short_name} vision encoder supports single-image only "
+                f"(num_frames=1), got {num_frames}"
+            )
+        logging.info(f"Loading {spec.hf_model_id} vision encoder (MiniCPMV46VisionModel)...")
+        vision_model = MiniCPMV46VisionModel.from_pretrained(
+            spec.hf_model_id, image_size=spec.image_size, dtype=torch.float32
+        )
         export_module = CastF16VisionEncoder(vision_model).eval()
         num_visual_tokens = spec.num_visual_tokens
         pixel_shape = (1, 3, spec.image_size, spec.image_size)

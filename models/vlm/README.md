@@ -11,6 +11,7 @@ supported models are registered in its `SUPPORTED_MODELS` table.
 |------------|---------------------------|------------------------------------------|
 | `qwen3-vl` | `Qwen/Qwen3-VL-2B-Instruct` | 448×448 vision encoder, f16 text decoder |
 | `muse-glimmer-vl` | `meta-models/Muse-Glimmer-30B` | ViT-G/14 vision encoder, f16 text decoder |
+| `minicpm-v-4.6` | `openbmb/MiniCPM-V-4.6` | 448×448 vision encoder, f16 hybrid text decoder (one image, no slices) |
 
 ## Exporting
 
@@ -65,6 +66,10 @@ time and written into the bundle's `metadata.json`. Override at runtime:
 ```bash
 swift run -c release llm-runner --model vlm_bundle --image photo.jpg --image-strategy center_crop --prompt "your prompt"
 ```
+
+`minicpm-v-4.6` encodes each image as one 448×448 square (64 tokens). The model's
+Hugging Face processor keeps the aspect ratio and adds slices for images larger than
+448×448, so the two match only for 448×448 input.
 
 ### Original resolution in prompt
 

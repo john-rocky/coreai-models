@@ -325,6 +325,14 @@ _METADATA: dict[str, AIModelMetadataFields] = {
         ),
     ),
     # ---- VLMs ----
+    "openbmb/MiniCPM-V-4.6": AIModelMetadataFields(
+        author="OpenBMB",
+        license="Apache-2.0",
+        model_description=(
+            "MiniCPM-V-4.6 is a 1.3B-parameter vision-language model built on SigLIP2 and "
+            "Qwen3.5-0.8B. Source: https://huggingface.co/openbmb/MiniCPM-V-4.6"
+        ),
+    ),
     "Qwen/Qwen3-VL-2B-Instruct": AIModelMetadataFields(
         author="Qwen Team",
         license="Apache-2.0",

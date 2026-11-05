@@ -286,6 +286,7 @@ uv run models/<name>/export.py --include-debug-info   # embed debug information 
 
 ### Vision-Language Models (VLMs)
 
+- [MiniCPM-V](vlm)
 - [Qwen3-VL](vlm)
 
 ### Vision Models
