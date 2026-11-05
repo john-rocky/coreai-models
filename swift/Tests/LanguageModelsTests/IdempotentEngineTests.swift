@@ -43,9 +43,9 @@ struct PrefixResetPlanTests {
                 commonPrefix: 3, historyCount: 3, processedTokenCount: 3, inputCount: 5,
                 hasNonTruncatableStates: false, expectedResetTo: nil, expectedHitCount: 3),
             Case(
-                name: "mid-sequence divergence triggers a full reset",
+                name: "mid-sequence divergence rewinds to the common prefix",
                 commonPrefix: 2, historyCount: 4, processedTokenCount: 4, inputCount: 4,
-                hasNonTruncatableStates: false, expectedResetTo: 0, expectedHitCount: 2),
+                hasNonTruncatableStates: false, expectedResetTo: 2, expectedHitCount: 2),
             Case(
                 name: "first-token divergence triggers a full reset",
                 commonPrefix: 0, historyCount: 3, processedTokenCount: 3, inputCount: 3,
@@ -95,6 +95,19 @@ struct PrefixResetPlanTests {
             hasNonTruncatableStates: false, ringCapacity: 2048)
         #expect(unwrapped.resetTo == 1499)
         #expect(unwrapped.prefixHitCount == 1500)
+
+        // A divergence that keeps a prefix follows the same rule as a rewind.
+        let divergedWrapped = CoreAISequentialEngine.prefixResetPlan(
+            commonPrefix: 2100, historyCount: 2600, processedTokenCount: 2600, inputCount: 2200,
+            hasNonTruncatableStates: false, ringCapacity: 2048)
+        #expect(divergedWrapped.resetTo == 0)
+        #expect(divergedWrapped.prefixHitCount == 0)
+
+        let divergedUnwrapped = CoreAISequentialEngine.prefixResetPlan(
+            commonPrefix: 1500, historyCount: 2000, processedTokenCount: 2000, inputCount: 1600,
+            hasNonTruncatableStates: false, ringCapacity: 2048)
+        #expect(divergedUnwrapped.resetTo == 1500)
+        #expect(divergedUnwrapped.prefixHitCount == 1500)
 
         // Exact re-submission past the ring rewinds one token, which is safe.
         let reseed = CoreAISequentialEngine.prefixResetPlan(

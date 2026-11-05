@@ -1241,8 +1241,15 @@ extension CoreAISequentialEngine {
             }
             return (nil, 0)
         } else if commonPrefix < inputCount && commonPrefix < historyCount {
-            // Divergence: input differs from history. Full reset needed.
-            return (0, commonPrefix)
+            // Divergence: keep the KV before the first differing token and reprocess from there.
+            guard
+                StateHandlerFactory.ringRewindIsSafe(
+                    from: processedTokenCount, to: commonPrefix, ringCapacity: ringCapacity)
+            else {
+                // The ring has overwritten slots the rewound position reads: replay.
+                return (0, 0)
+            }
+            return (commonPrefix, commonPrefix)
         } else if processedTokenCount >= inputCount {
             // Pure extension: all input tokens match history. Rewind for seeding.
             let target = Swift.max(0, commonPrefix - 1)

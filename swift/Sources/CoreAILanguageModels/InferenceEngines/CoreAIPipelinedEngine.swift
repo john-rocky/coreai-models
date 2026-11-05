@@ -186,36 +186,24 @@ final class CoreAIPipelinedEngine: InferenceEngine, ConstrainedGenerationCapable
                     resolvedNewTokens = input[commonPrefix...]
                 }
 
-                if isDivergence {
-                    // Tokens differ — full reset (partial rewind corrupts buffer rotation)
-                    await self.engine.computeStream.currentWorkCompleted()
-                    self.engine.reset()
-                    self.history.clear()
-                    resolvedNewTokens = input[...]
-                    commonPrefix = 0
-                } else if self.engine.hasNonTruncatableStates {
-                    // Hybrid model: recurrent state can't be partially rewound.
-                    // Full reset and replay the entire prompt.
-                    if commonPrefix < self.engine.processedTokenCount {
-                        await self.engine.computeStream.currentWorkCompleted()
-                        self.engine.reset()
-                        self.history.clear()
-                        resolvedNewTokens = input[...]
-                        commonPrefix = 0
-                    }
-                } else if !StateHandlerFactory.ringRewindIsSafe(
-                    from: self.engine.processedTokenCount, to: commonPrefix,
-                    ringCapacity: self.engine.slidingRingCapacity)
+                let needsRewind = isDivergence || commonPrefix < self.engine.processedTokenCount
+                if needsRewind
+                    && (commonPrefix == 0 || self.engine.hasNonTruncatableStates
+                        || !StateHandlerFactory.ringRewindIsSafe(
+                            from: self.engine.processedTokenCount, to: commonPrefix,
+                            ringCapacity: self.engine.slidingRingCapacity))
                 {
-                    // The ring has overwritten slots the rewound position reads: replay.
+                    // Nothing to keep, a recurrent state that can't be partially rewound, or a ring
+                    // that has overwritten slots the rewound position reads: replay the prompt.
                     await self.engine.computeStream.currentWorkCompleted()
                     self.engine.reset()
                     self.history.clear()
                     resolvedNewTokens = input[...]
                     commonPrefix = 0
                     self.lastPrefixHitCount = 0
-                } else if commonPrefix < self.engine.processedTokenCount {
-                    // Pure extension — partial rewind (buffer phase preserved)
+                } else if needsRewind {
+                    // Keep the KV before the first differing token and reprocess from there. Every
+                    // position past the cursor is rewritten before a later step reads it.
                     await self.engine.computeStream.currentWorkCompleted()
                     self.engine.processedTokenCount = commonPrefix
                     self.engine.step = commonPrefix
